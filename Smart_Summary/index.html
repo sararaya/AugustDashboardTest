@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ملخّص ذكي — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content
+  ==========================================
+  "Smart summary" pill. Design tokens taken from the Figma export:
+    --color-spring-green-39  #00C993   values, badge text
+    --color-spring-green-59  #84A89B   body text
+    bubble  rgba(0,201,147,.05) + 1px rgba(0,201,147,.20) outline, r=50px
+    badge   rgba(0,201,147,.06) + 1px rgba(0,201,147,.20) outline, r=20px
+    type    Tajawal 700 @16px (sentence), Tajawal 400 @14px (badge)
+
+  DATA ROLES  ("Variables" role, in order)
+  ----------------------------------------
+    1. MEASURE -> {1}   Distinct count of Traffic No        e.g. 143,765
+    2. MEASURE -> {2}   Total fine value, RAW AED           e.g. 2070000000
+    3. MEASURE -> {3}   Average tickets per year            e.g. 536
+
+  PLACEHOLDER FORMATS
+  -------------------
+    {n}      plain number with thousand separators        143,765
+    {n:c}    auto-scaled with an Arabic magnitude word    2.07 مليار
+             (ألف / مليون / مليار / تريليون chosen from the value itself)
+    {n:c1}   same, forced to 1 decimal place
+    {n:0}    plain, forced to 0 decimals
+
+    Use {n:c} for money. Pass the RAW figure and let the object choose the
+    word, so the sentence stays correct when a filter shrinks the total from
+    billions to millions. Hard-coding "مليار" in the template would not.
+
+    Any number of measures works; they map to {1},{2},{3}... in role order.
+    Only the FIRST ROW of the result set is read, so the query should
+    aggregate to a single row.
+
+  URL PARAMETERS (all optional)
+  -----------------------------
+    ?t=      URL-encoded sentence template using {1} {2} {3}
+    ?badge=  badge label (default "ملخّص ذكي"; pass empty to hide)
+    ?dp=     decimal places for non-whole numbers (default 2)
+    ?size=   starting font size in px (default 16)
+    ?min=    smallest font size auto-fit may shrink to (default 10)
+    ?scale=  ar | en | none   magnitude words for {n:c} (default ar)
+    ?align=  center | start   (default center)
+    ?font=0  skip the Google Fonts request and use system fonts
+
+  Because the template lives in the URL, this one hosted file can serve every
+  summary bubble in the report.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap">
+<style>
+  :root{
+    /* --- tokens lifted from the Figma export --- */
+    --sg-39:#00C993;          /* spring-green-39  : values, badge */
+    --sg-59:#84A89B;          /* spring-green-59  : body text     */
+    --sg-87:#CFEEE2;
+    --sg-39-05:rgba(0,201,147,.05);
+    --sg-39-06:rgba(0,201,147,.06);
+    --sg-39-20:rgba(0,201,147,.20);
+    --size:16px;
+    --fonts:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;overflow:hidden;color:var(--sg-59);
+       font-family:var(--fonts);-webkit-font-smoothing:antialiased}
+  #wrap{height:100%;width:100%;min-height:0;min-width:0;padding:6px;
+        display:flex;align-items:center;justify-content:center}
+  body.start #wrap{justify-content:flex-start}
+
+  .bubble{
+    display:inline-flex;align-items:center;gap:12px;
+    max-width:100%;min-width:0;
+    padding:8px 16px 10px 16px;              /* t r b l - per the export */
+    background:var(--sg-39-05);
+    border-radius:50px;
+    outline:1px var(--sg-39-20) solid;outline-offset:-1px;
+    animation:rise .45s cubic-bezier(.22,.9,.3,1) both;
+  }
+  @keyframes rise{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.bubble{animation:none}}
+
+  .txt{
+    min-width:0;padding-top:6px;
+    font-size:var(--size);font-weight:700;line-height:1.5;
+    color:var(--sg-59);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  body.wrapmode .txt{white-space:normal}
+  .txt b{color:var(--sg-39);font-weight:700;font-variant-numeric:tabular-nums}
+  .txt .sep{color:rgba(132,168,155,.55);padding:0 1px}
+
+  .badge{
+    display:inline-flex;align-items:center;justify-content:flex-end;gap:4px;flex:none;
+    padding:6px 16px 6px 20px;               /* t r b l - per the export */
+    background:var(--sg-39-06);
+    border-radius:20px;
+    outline:1px var(--sg-39-20) solid;outline-offset:-1px;
+    color:var(--sg-39);
+    font-size:calc(var(--size) - 2px);font-weight:400;line-height:1.66;
+    white-space:nowrap;
+  }
+  .badge svg{width:16px;height:16px;flex:none;color:#04CA95}
+
+  /* shrink gracefully in short containers */
+  body.compact .bubble{padding:6px 12px 7px;gap:8px;border-radius:30px}
+  body.compact .txt{padding-top:2px}
+  body.compact .badge{padding:4px 11px 4px 13px}
+  /* if the pill cannot fit on one line, become a rounded block and wrap */
+  body.wrapmode .bubble{border-radius:18px;align-items:flex-start;padding:12px 16px}
+  body.wrapmode .txt{white-space:normal;text-overflow:clip}
+
+  #msg{color:rgba(132,168,155,.5);font-size:12.5px}
+</style>
+</head>
+<body>
+<div id="wrap"><span id="msg">في انتظار البيانات…</span></div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------------- url params ---------------- */
+  var Q = {};
+  location.search.replace(/^\?/, "").split("&").forEach(function (kv) {
+    if (!kv) return;
+    var i = kv.indexOf("=");
+    var k = decodeURIComponent(i < 0 ? kv : kv.slice(0, i));
+    var v = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1).replace(/\+/g, " "));
+    Q[k] = v;
+  });
+
+  var DEFAULT_TEMPLATE =
+    "{1} سائقاً ضمن قائمة الخطر · قيمة مخالفات {2:c} درهم · بمعدل {3} مخالفة سنوياً.";
+
+  var TEMPLATE = (Q.t !== undefined && Q.t !== "") ? Q.t : DEFAULT_TEMPLATE;
+  var BADGE    = (Q.badge !== undefined) ? Q.badge : "ملخّص ذكي";
+  var DP       = (Q.dp !== undefined) ? parseInt(Q.dp, 10) : 2;
+  if (isNaN(DP)) DP = 2;
+  var BASE = Q.size ? parseInt(Q.size, 10) : 16;
+  var MINSZ = Q.min ? parseInt(Q.min, 10) : 10;
+  if (isNaN(BASE) || BASE < 6) BASE = 16;
+  if (isNaN(MINSZ) || MINSZ < 6) MINSZ = 10;
+  var SCALE = Q.scale || "ar";
+  if (Q.align === "start") document.body.classList.add("start");
+  // locked-down networks may block Google Fonts; ?font=0 removes the request
+  if (Q.font === "0") { var g = document.getElementById("gfont"); if (g) g.remove(); }
+
+  var wrap = document.getElementById("wrap");
+
+  var UNITS = {
+    ar: [[1e12, "تريليون"], [1e9, "مليار"], [1e6, "مليون"], [1e3, "ألف"]],
+    en: [[1e12, "trillion"], [1e9, "billion"], [1e6, "million"], [1e3, "thousand"]],
+    none: []
+  };
+
+  function num(n, dp) {
+    return n.toLocaleString("en-US", { maximumFractionDigits: dp });
+  }
+
+  /* plain number, thousands separated */
+  function fmt(v, dp) {
+    if (v === null || v === undefined || v === "") return "";
+    var n = Number(v);
+    if (isNaN(n)) return String(v);
+    var whole = Math.abs(n % 1) < 1e-9;
+    return num(n, whole ? 0 : (dp === undefined ? DP : dp));
+  }
+
+  /* auto-scaled: picks the magnitude word from the value itself, so the
+     sentence stays true when a filter changes the order of magnitude */
+  function fmtCompact(v, dp) {
+    if (v === null || v === undefined || v === "") return "";
+    var n = Number(v);
+    if (isNaN(n)) return String(v);
+    var tiers = UNITS[SCALE] || UNITS.ar, a = Math.abs(n);
+    for (var i = 0; i < tiers.length; i++) {
+      if (a >= tiers[i][0]) {
+        var x = n / tiers[i][0];
+        var d = (dp !== undefined) ? dp : (Math.abs(x) >= 100 ? 1 : 2);
+        return num(x, d) + " " + tiers[i][1];
+      }
+    }
+    return num(n, Math.abs(n % 1) < 1e-9 ? 0 : (dp === undefined ? DP : dp));
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  /* the Figma export used an SF Pro private-use glyph, which only renders on
+     macOS - an inline SVG sparkle is equivalent and portable */
+  var SPARK =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M12 3.4 13.75 9l5.6 1.75L13.75 12.5 12 18.1l-1.75-5.6L4.65 10.75 10.25 9 12 3.4Z"/>' +
+    '<path d="M18.7 3.5v2.5M19.95 4.75h-2.5"/></svg>';
+
+  function render(values) {
+    var html = esc(TEMPLATE).replace(/\{(\d+)(?::([a-z]?)(\d*))?\}/g,
+      function (_, n, kind, digits) {
+        var v = values[Number(n) - 1];
+        if (v === undefined || v === null) return "";
+        var dp = digits === "" ? undefined : parseInt(digits, 10);
+        var out = (kind === "c") ? fmtCompact(v, dp) : fmt(v, dp);
+        return "<b>" + esc(out) + "</b>";
+      });
+    html = html.replace(/\s·\s/g, ' <span class="sep">·</span> ');
+
+    wrap.innerHTML =
+      '<div class="bubble">' +
+        '<span class="txt">' + html + "</span>" +
+        (BADGE ? '<span class="badge">' + esc(BADGE) + SPARK + "</span>" : "") +
+      "</div>";
+    fit();
+  }
+
+  /* ----------------------------------------------------------------------
+     Auto-fit to the DDC frame.
+     1. try the base size on one line
+     2. step the type down until the pill fits the width
+     3. only if it still will not fit at the minimum size, allow wrapping and
+        step down again until it fits the height too
+     Runs inside requestAnimationFrame so a resize drag does not thrash layout.
+     ---------------------------------------------------------------------- */
+  function setSize(px) {
+    document.documentElement.style.setProperty("--size", px + "px");
+  }
+
+  function fit() {
+    var b = wrap.querySelector(".bubble");
+    if (!b) return;
+    var availW = wrap.clientWidth - 12,
+        availH = wrap.clientHeight - 12;
+    if (availW <= 0 || availH <= 0) return;
+
+    document.body.classList.remove("wrapmode");
+    var size = BASE, guard = 0;
+    setSize(size);
+
+    // shrink to fit on a single line
+    while ((b.scrollWidth > availW || b.scrollHeight > availH) &&
+           size > MINSZ && guard++ < 60) {
+      size -= 0.5;
+      setSize(size);
+    }
+
+    // still overflowing at the floor -> permit wrapping, then shrink again
+    if (b.scrollWidth > availW || b.scrollHeight > availH) {
+      document.body.classList.add("wrapmode");
+      size = BASE; guard = 0;
+      setSize(size);
+      while ((b.scrollHeight > availH || b.scrollWidth > availW) &&
+             size > MINSZ && guard++ < 60) {
+        size -= 0.5;
+        setSize(size);
+      }
+    }
+  }
+
+  var fitPending = false;
+  function scheduleFit() {
+    if (fitPending) return;
+    fitPending = true;
+    requestAnimationFrame(function () { fitPending = false; fit(); });
+  }
+
+  function onMessage(ev) {
+    var m = ev.data;
+    if (!m || typeof m !== "object" || !m.columns || !m.data) return;
+    render((m.data && m.data[0]) || []);   // single aggregated row
+  }
+  window.addEventListener("message", onMessage, false);
+
+  function applyLayout() {
+    document.body.classList.toggle("compact", document.documentElement.clientHeight < 64);
+    scheduleFit();
+  }
+  if (window.ResizeObserver) new ResizeObserver(applyLayout).observe(document.documentElement);
+  window.addEventListener("resize", applyLayout, false);
+  // webfont swap changes metrics, so refit once Tajawal has loaded
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleFit);
+  applyLayout();
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window) {
+    onMessage({ data: {
+      resultName: "preview",
+      columns: [
+        { name: "m1", label: "Dangerous drivers", type: "number", usage: "quantitative" },
+        { name: "m2", label: "Fines (bn AED)",    type: "number", usage: "quantitative" },
+        { name: "m3", label: "Avg tickets / year",  type: "number", usage: "quantitative" }
+      ],
+      data: [[143765, 2070000000, 536]]
+    }});
+  }
+})();
+</script>
+</body>
+</html>
