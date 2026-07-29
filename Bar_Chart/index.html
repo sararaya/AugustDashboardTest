@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bar Chart — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content        Bars  v1 2026-07-29
+  =====================================================================
+  Generic horizontal bar chart. Transparent background, no card, no title -
+  the VA container supplies those.
+
+  DATA ROLES  ("Variables" role)
+  ------------------------------
+  Assign one or more CATEGORY / MEASURE PAIRS, in order:
+
+      1. Category A   2. Measure A      -> first chart
+      3. Category B   4. Measure B      -> second chart
+      5. Category C   6. Measure C      -> third chart   ... and so on
+
+  With a single pair the object renders one chart. With two or more it adds a
+  segmented button bar at the top, labelled with each CATEGORY's name, and
+  clicking a button switches chart. Pairing is positional: the nth category
+  is matched with the nth measure.
+
+  HOW THE ROLL-UP WORKS - AND ITS ONE LIMIT
+  -----------------------------------------
+  Assigning two categories makes VA group by BOTH, so it returns a row per
+  combination. Each chart is rebuilt by rolling its own measure up over its
+  own category. That is exact when the measure is additive (Sum / Count), and
+  also for a DISTINCT COUNT provided each entity belongs to exactly one value
+  of the other category - true for attributes like sponsor and nationality,
+  where a driver has exactly one of each.
+
+  It is NOT safe if an entity can appear under several values of the other
+  category. A driver has one sponsor but many offence types, so pairing
+  sponsor with offence would count that driver once per offence. Put charts
+  like that in separate objects.
+
+  URL PARAMETERS
+  --------------
+    ?max=8          most bars to draw (default: as many as fit the height)
+    ?sort=desc      desc | asc | none          (default desc)
+    ?fmt=plain      plain | c (compact: ألف / مليون)   (default plain)
+    ?labels=A|B     override the button labels
+    ?select=0       disable click-to-filter
+    ?size=13        label font size in px
+    ?font=0         skip the Google Fonts request
+    ?debug=1        show the pairs detected and the rolled-up values
+
+  Clicking a bar posts a selection back to VA, so the chart can drive filter
+  or linked-selection actions like any native object.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap">
+<style>
+  :root{
+    --mint:#00C993; --mint-2:#2BE5A8;
+    --track:rgba(255,255,255,.07);
+    --label:#DCEFE8; --value:#00C993; --muted:#7E948C;
+    --btn-bg:rgba(255,255,255,.04); --btn-line:rgba(255,255,255,.07);
+    --size:13px; --bar:8px;
+    --ar:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;color:var(--label);font-family:var(--ar);
+       overflow:hidden;-webkit-font-smoothing:antialiased}
+  #root{height:100%;width:100%;min-height:0;min-width:0;
+        display:flex;flex-direction:column;gap:10px;padding:2px}
+
+  /* segmented switch - only rendered when more than one pair is assigned */
+  #tabs{flex:none;display:flex;align-self:flex-start;gap:4px;padding:4px;
+        background:var(--btn-bg);border:1px solid var(--btn-line);border-radius:12px}
+  #tabs button{font-family:inherit;font-size:12.5px;font-weight:500;
+        padding:6px 16px;border-radius:9px;border:0;cursor:pointer;
+        background:transparent;color:var(--muted);white-space:nowrap;
+        transition:background .18s ease,color .18s ease}
+  #tabs button:hover{color:var(--label)}
+  #tabs button.on{background:var(--mint);color:#062B21;font-weight:700}
+
+  #rows{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;
+        justify-content:space-between;gap:2px;overflow:hidden}
+
+  .row{display:flex;flex-direction:column;gap:5px;min-height:0;cursor:pointer}
+  .row.noclick{cursor:default}
+  .row .top{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+  .row .lbl{font-size:var(--size);color:var(--label);font-weight:500;
+            min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+            text-align:right}
+  .row .val{font-size:var(--size);color:var(--value);font-weight:700;
+            font-variant-numeric:tabular-nums;flex:none;direction:ltr}
+  .track{height:var(--bar);border-radius:999px;background:var(--track);
+         overflow:hidden;display:flex;justify-content:flex-start}
+  /* RTL: the fill grows from the right-hand edge */
+  .fill{height:100%;border-radius:999px;
+        background:linear-gradient(90deg,var(--mint) 0%,var(--mint-2) 100%);
+        transition:width .45s cubic-bezier(.22,.9,.3,1);min-width:3px}
+  .row:hover .fill{filter:brightness(1.14)}
+  .row.sel .fill{box-shadow:0 0 0 1.5px var(--mint-2)}
+  .row.dim{opacity:.42}
+
+  #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+       color:var(--muted);font-size:12.5px;pointer-events:none}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;z-index:9;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.97);direction:ltr;text-align:left}
+  #dbg h4{margin:8px 0 4px;font-size:12px;color:var(--mint)}
+  #dbg table{border-collapse:collapse;margin:4px 0;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(0,201,147,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:var(--mint);font-weight:600}
+  #dbg .bad{color:#FF6B6B} #dbg .ok{color:var(--mint)}
+</style>
+</head>
+<body>
+<div id="root">
+  <div id="tabs" style="display:none"></div>
+  <div id="rows"></div>
+</div>
+<div id="msg">في انتظار البيانات…</div>
+
+<script>
+(function(){
+  "use strict";
+  var VERSION = "Bars v1 2026-07-29";
+  console.log("[" + VERSION + "]");
+
+  var Q = {};
+  location.search.replace(/^\?/,"").split("&").forEach(function(kv){
+    if(!kv) return;
+    var i = kv.indexOf("=");
+    var k = decodeURIComponent(i<0?kv:kv.slice(0,i));
+    var v = i<0?"":decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));
+    Q[k]=v;
+  });
+  if (Q.font === "0"){ var g=document.getElementById("gfont"); if(g) g.remove(); }
+  if (Q.size) document.documentElement.style.setProperty("--size", parseInt(Q.size,10)+"px");
+
+  var MAXBARS  = Q.max ? parseInt(Q.max,10) : 0;   // 0 = fit to height
+  var SORT     = Q.sort || "desc";
+  var COMPACT  = Q.fmt === "c";
+  var SELECTABLE = Q.select !== "0";
+  var OVERRIDE = Q.labels ? Q.labels.split("|") : null;
+  var DEBUG    = Q.debug === "1";
+
+  var TIERS = [[1e9,"مليار"],[1e6,"مليون"],[1e3,"ألف"]];
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+  function num(n,dp){ return Number(n).toLocaleString("en-US",{maximumFractionDigits:dp}); }
+  function fmtVal(v){
+    var n = Number(v); if (isNaN(n)) return String(v);
+    if (COMPACT){
+      var a = Math.abs(n);
+      for (var i=0;i<TIERS.length;i++){
+        if (a >= TIERS[i][0]) return num(n/TIERS[i][0], Math.abs(n/TIERS[i][0])>=100?0:1)+" "+TIERS[i][1];
+      }
+    }
+    return num(n, Math.abs(n%1)<1e-9 ? 0 : 1);
+  }
+
+  var CHARTS = [], ACTIVE = 0, RESULT = null, SEL = {};
+
+  /* ---- pair the nth category with the nth measure ---- */
+  function buildCharts(m){
+    var cols = m.columns || [], rows = m.data || [];
+    var cats = [], meas = [];
+    cols.forEach(function(c,i){
+      var u = String(c.usage||"").toLowerCase(), t = String(c.type||"").toLowerCase();
+      if (u === "quantitative" || (!u && t === "number")) meas.push(i);
+      else cats.push(i);
+    });
+
+    var out = [];
+    var pairs = Math.min(cats.length, meas.length);
+    for (var p = 0; p < pairs; p++){
+      var ci = cats[p], mi = meas[p];
+      // roll the measure up over its own category, collapsing the other
+      // categories VA cross-joined into the result
+      var acc = {}, order = [], srcRows = {};
+      rows.forEach(function(r, ri){
+        var k = String(r[ci]);
+        if (k === "" || k === "null" || k === "undefined") return;
+        var v = Number(r[mi]); if (isNaN(v)) v = 0;
+        if (!(k in acc)){ acc[k] = 0; order.push(k); srcRows[k] = []; }
+        acc[k] += v;
+        srcRows[k].push(ri);
+      });
+      var items = order.map(function(k){ return {k:k, v:acc[k], rows:srcRows[k]}; });
+      if (SORT === "desc") items.sort(function(a,b){ return b.v - a.v; });
+      else if (SORT === "asc") items.sort(function(a,b){ return a.v - b.v; });
+
+      out.push({
+        label: (OVERRIDE && OVERRIDE[p]) || cols[ci].label || cols[ci].name || ("Chart " + (p+1)),
+        measureLabel: cols[mi].label || cols[mi].name || "",
+        items: items
+      });
+    }
+    return out;
+  }
+
+  /* ---- how many bars fit the current height ---- */
+  function barsThatFit(){
+    var host = document.getElementById("rows");
+    var h = host.clientHeight;
+    if (h <= 0) return 5;
+    var rowMin = 34;                       // label + bar + breathing room
+    return Math.max(1, Math.floor(h / rowMin));
+  }
+
+  function render(){
+    var host = document.getElementById("rows");
+    var tabs = document.getElementById("tabs");
+    document.getElementById("msg").style.display = CHARTS.length ? "none" : "flex";
+    if (!CHARTS.length){ host.innerHTML = ""; tabs.style.display = "none"; return; }
+
+    /* segmented switch, only when more than one pair was assigned */
+    if (CHARTS.length > 1){
+      tabs.style.display = "flex";
+      tabs.innerHTML = CHARTS.map(function(c,i){
+        return '<button type="button" data-i="' + i + '"' +
+               (i === ACTIVE ? ' class="on"' : "") + ">" + esc(c.label) + "</button>";
+      }).join("");
+    } else {
+      tabs.style.display = "none";
+    }
+
+    var chart = CHARTS[Math.min(ACTIVE, CHARTS.length-1)];
+    var limit = MAXBARS || barsThatFit();
+    var items = chart.items.slice(0, limit);
+    var max = items.reduce(function(a,b){ return Math.max(a, b.v); }, 0) || 1;
+    var anySel = Object.keys(SEL).length > 0;
+
+    host.innerHTML = items.map(function(it){
+      var w = Math.max(2, it.v / max * 100);
+      var cls = "row" + (SELECTABLE ? "" : " noclick") +
+                (SEL[it.k] ? " sel" : "") + (anySel && !SEL[it.k] ? " dim" : "");
+      return '<div class="' + cls + '" data-k="' + esc(it.k) + '">' +
+               '<div class="top">' +
+                 '<span class="val">' + esc(fmtVal(it.v)) + "</span>" +
+                 '<span class="lbl" title="' + esc(it.k) + '">' + esc(it.k) + "</span>" +
+               "</div>" +
+               '<div class="track"><span class="fill" style="width:' + w + '%"></span></div>' +
+             "</div>";
+    }).join("");
+  }
+
+  /* ---- selection back to VA ---- */
+  function toggle(key, additive){
+    if (!SELECTABLE) return;
+    if (!additive){
+      var only = SEL[key] && Object.keys(SEL).length === 1;
+      SEL = {};
+      if (!only) SEL[key] = true;
+    } else {
+      if (SEL[key]) delete SEL[key]; else SEL[key] = true;
+    }
+    var chart = CHARTS[ACTIVE], sels = [];
+    if (chart) chart.items.forEach(function(it){
+      if (SEL[it.k]) it.rows.forEach(function(ri){ sels.push({row: ri}); });
+    });
+    try { window.parent.postMessage({ resultName: RESULT, selections: sels }, "*"); } catch(e){}
+    render();
+  }
+
+  document.addEventListener("click", function(ev){
+    var b = ev.target.closest("#tabs button");
+    if (b){ ACTIVE = parseInt(b.getAttribute("data-i"),10); SEL = {}; render(); return; }
+    var r = ev.target.closest(".row");
+    if (r && SELECTABLE) toggle(r.getAttribute("data-k"), ev.ctrlKey || ev.metaKey || ev.shiftKey);
+  });
+
+  function dump(m){
+    var d = document.getElementById("dbg");
+    if(!d){ d=document.createElement("div"); d.id="dbg"; document.body.appendChild(d); }
+    var h = "<h4>Bars debug</h4>version: <b class='ok'>"+VERSION+"</b><br>";
+    h += "rows from VA: <b>" + (m.data||[]).length + "</b>";
+    if (m.availableRowCount !== undefined && m.availableRowCount > m.rowCount)
+      h += " <span class='bad'>of " + m.availableRowCount + " - TRUNCATED</span>";
+    h += "<br>pairs detected: <b class='" + (CHARTS.length?"ok":"bad") + "'>" + CHARTS.length + "</b><br>";
+    h += "bars that fit at this size: <b>" + barsThatFit() + "</b>";
+    CHARTS.forEach(function(c,i){
+      h += "<h4>chart " + (i+1) + ": " + esc(c.label) + " &times; " + esc(c.measureLabel) + "</h4>";
+      h += "<table><tr><th>#</th><th>value</th><th>measure</th></tr>";
+      c.items.slice(0,12).forEach(function(it,j){
+        h += "<tr><td>"+(j+1)+"</td><td>"+esc(it.k)+"</td><td>"+num(it.v,1)+"</td></tr>";
+      });
+      h += "</table>";
+      if (c.items.length && c.items[0].v > 1e8)
+        h += "<span class='bad'>values look implausibly large - the measure may be " +
+             "aggregating an ID column as SUM. Check the aggregation.</span>";
+    });
+    d.innerHTML = h;
+  }
+
+  function onMessage(ev){
+    var m = ev.data;
+    if (!m || typeof m !== "object" || !m.columns || !m.data) return;
+    RESULT = m.resultName || RESULT;
+    CHARTS = buildCharts(m);
+    if (ACTIVE >= CHARTS.length) ACTIVE = 0;
+    SEL = {};
+    if (m.selections && m.selections.length && CHARTS[ACTIVE]){
+      var want = {};
+      m.selections.forEach(function(s){ want[s.row] = 1; });
+      CHARTS[ACTIVE].items.forEach(function(it){
+        if (it.rows.some(function(ri){ return want[ri]; })) SEL[it.k] = true;
+      });
+    }
+    if (DEBUG){ dump(m); return; }
+    render();
+  }
+  window.addEventListener("message", onMessage, false);
+
+  /* re-render on resize so the bar count tracks the container height */
+  var pend = false;
+  function onResize(){
+    if (pend) return; pend = true;
+    requestAnimationFrame(function(){ pend = false; if (CHARTS.length) render(); });
+  }
+  if (window.ResizeObserver) new ResizeObserver(onResize).observe(document.documentElement);
+  window.addEventListener("resize", onResize, false);
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window){
+    onMessage({ data:{
+      resultName:"preview",
+      columns:[
+        {name:"c1",label:"المؤسسة", type:"string",usage:"categorical"},
+        {name:"m1",label:"Drivers", type:"number",usage:"quantitative"},
+        {name:"c2",label:"الجنسية", type:"string",usage:"categorical"},
+        {name:"m2",label:"Drivers2",type:"number",usage:"quantitative"}
+      ],
+      data:[
+        ["شركة دبي لتأجير السيارات",4120,"الإمارات",1670],
+        ["القطيم لخدمات النقل والتأجير",3560,"الهند",1590],
+        ["مؤسسة تاكسي دبي",2980,"باكستان",960],
+        ["مؤسسة دبي لخدمات الإسعاف",2140,"مصر",640],
+        ["إيزي لتأجير الدراجات النارية",1760,"بنغلاديش",560],
+        ["الاتحاد للمقاولات الوطنية",1290,"الفلبين",400]
+      ]
+    }});
+  }
+})();
+</script>
+</body>
+</html>
