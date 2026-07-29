@@ -18,7 +18,9 @@
   ----------------------------------------
     1. MEASURE -> {1}   Distinct count of Traffic No        e.g. 143,765
     2. MEASURE -> {2}   Total fine value, RAW AED           e.g. 2070000000
-    3. MEASURE -> {3}   Average tickets per year            e.g. 536
+    3. MEASURE -> {3}   Count of TICKET_NO                  e.g. 2,462
+    4. MEASURE -> {4}   Distinct count of the year           e.g. 5
+                        ({3/4} divides them -> avg tickets per year)
 
   PLACEHOLDER FORMATS
   -------------------
@@ -27,6 +29,10 @@
              (ألف / مليون / مليار / تريليون chosen from the value itself)
     {n:c1}   same, forced to 1 decimal place
     {n:0}    plain, forced to 0 decimals
+    {n/m}    value n DIVIDED BY value m, e.g. tickets ÷ distinct years.
+             Lets VA supply two plain aggregations instead of forcing you to
+             build an aggregated-measure expression.
+    {n/m:0}  same, forced to 0 decimals
 
     Use {n:c} for money. Pass the RAW figure and let the object choose the
     word, so the sentence stays correct when a filter shrinks the total from
@@ -46,6 +52,8 @@
     ?scale=  ar | en | none   magnitude words for {n:c} (default ar)
     ?align=  center | start   (default center)
     ?font=0  skip the Google Fonts request and use system fonts
+    ?debug=1 show exactly what VA sent: columns, roles, row count, values.
+             Use this first whenever the bubble comes up blank.
 
   Because the template lives in the URL, this one hosted file can serve every
   summary bubble in the report.
@@ -90,6 +98,7 @@
     min-width:0;padding-top:6px;
     font-size:var(--size);font-weight:700;line-height:1.5;
     color:var(--sg-59);
+    text-align:right;              /* RTL start edge */
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   }
   body.wrapmode .txt{white-space:normal}
@@ -113,10 +122,28 @@
   body.compact .txt{padding-top:2px}
   body.compact .badge{padding:4px 11px 4px 13px}
   /* if the pill cannot fit on one line, become a rounded block and wrap */
-  body.wrapmode .bubble{border-radius:18px;align-items:flex-start;padding:12px 16px}
-  body.wrapmode .txt{white-space:normal;text-overflow:clip}
+  /* wrapped: take the available width so the sentence can breathe, keep the
+     badge pinned to the start of the line and the text right-aligned */
+  body.wrapmode #wrap{align-items:stretch}
+  body.wrapmode .bubble{
+    border-radius:18px;align-items:flex-start;padding:12px 16px;
+    width:100%;max-width:100%;
+  }
+  body.wrapmode .txt{
+    white-space:normal;text-overflow:clip;overflow:visible;
+    flex:1 1 auto;text-align:right;
+  }
 
   #msg{color:rgba(132,168,155,.5);font-size:12.5px}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.96);direction:ltr;text-align:left}
+  #dbg h4{margin:0 0 6px;font-size:12px;color:#00C993}
+  #dbg table{border-collapse:collapse;margin:4px 0 10px;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(0,201,147,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:#00C993;font-weight:600}
+  #dbg .bad{color:#FF6B6B}
+  #dbg .ok{color:#00C993}
 </style>
 </head>
 <body>
@@ -137,7 +164,7 @@
   });
 
   var DEFAULT_TEMPLATE =
-    "{1} سائقاً ضمن قائمة الخطر · قيمة مخالفات {2:c} درهم · بمعدل {3} مخالفة سنوياً.";
+    "{1} سائقاً ضمن قائمة الخطر · قيمة مخالفات {2:c} درهم · بمعدل {3/4:0} مخالفة سنوياً.";
 
   var TEMPLATE = (Q.t !== undefined && Q.t !== "") ? Q.t : DEFAULT_TEMPLATE;
   var BADGE    = (Q.badge !== undefined) ? Q.badge : "ملخّص ذكي";
@@ -204,11 +231,19 @@
     '<path d="M18.7 3.5v2.5M19.95 4.75h-2.5"/></svg>';
 
   function render(values) {
-    var html = esc(TEMPLATE).replace(/\{(\d+)(?::([a-z]?)(\d*))?\}/g,
-      function (_, n, kind, digits) {
+    var html = esc(TEMPLATE).replace(
+      /\{(\d+)(?:\/(\d+))?(?::([a-z]?)(\d*))?\}/g,
+      function (_, n, den, kind, digits) {
         var v = values[Number(n) - 1];
-        if (v === undefined || v === null) return "";
-        var dp = digits === "" ? undefined : parseInt(digits, 10);
+        if (v === undefined || v === null || v === "") return "";
+        // {n/m} -> ratio, so two ordinary VA aggregations can stand in for
+        // a calculated ratio (e.g. count of tickets / distinct count of years)
+        if (den !== undefined) {
+          var d = Number(values[Number(den) - 1]);
+          if (!d || isNaN(d)) return "";
+          v = Number(v) / d;
+        }
+        var dp = (digits === "" || digits === undefined) ? undefined : parseInt(digits, 10);
         var out = (kind === "c") ? fmtCompact(v, dp) : fmt(v, dp);
         return "<b>" + esc(out) + "</b>";
       });
@@ -234,6 +269,10 @@
     document.documentElement.style.setProperty("--size", px + "px");
   }
 
+  function fits(b, w, h) {
+    return b.scrollWidth <= w + 0.5 && b.scrollHeight <= h + 0.5;
+  }
+
   function fit() {
     var b = wrap.querySelector(".bubble");
     if (!b) return;
@@ -241,27 +280,31 @@
         availH = wrap.clientHeight - 12;
     if (availW <= 0 || availH <= 0) return;
 
+    // 1. best case: full size, single line
     document.body.classList.remove("wrapmode");
-    var size = BASE, guard = 0;
-    setSize(size);
+    setSize(BASE);
+    if (fits(b, availW, availH)) return;
 
-    // shrink to fit on a single line
-    while ((b.scrollWidth > availW || b.scrollHeight > availH) &&
-           size > MINSZ && guard++ < 60) {
+    // 2. prefer WRAPPING at full size over shrinking to unreadable text
+    document.body.classList.add("wrapmode");
+    setSize(BASE);
+    if (fits(b, availW, availH)) return;
+
+    // 3. still too tall/wide when wrapped: step the type down
+    var size = BASE, guard = 0;
+    while (!fits(b, availW, availH) && size > MINSZ && guard++ < 60) {
       size -= 0.5;
       setSize(size);
     }
+    if (fits(b, availW, availH)) return;
 
-    // still overflowing at the floor -> permit wrapping, then shrink again
-    if (b.scrollWidth > availW || b.scrollHeight > availH) {
-      document.body.classList.add("wrapmode");
-      size = BASE; guard = 0;
+    // 4. last resort for very short frames: single line, shrunk
+    document.body.classList.remove("wrapmode");
+    size = BASE; guard = 0;
+    setSize(size);
+    while (!fits(b, availW, availH) && size > MINSZ && guard++ < 60) {
+      size -= 0.5;
       setSize(size);
-      while ((b.scrollHeight > availH || b.scrollWidth > availW) &&
-             size > MINSZ && guard++ < 60) {
-        size -= 0.5;
-        setSize(size);
-      }
     }
   }
 
@@ -272,9 +315,38 @@
     requestAnimationFrame(function () { fitPending = false; fit(); });
   }
 
+  var DEBUG = Q.debug === "1";
+
+  function debugDump(m) {
+    var d = document.getElementById("dbg");
+    if (!d) { d = document.createElement("div"); d.id = "dbg"; document.body.appendChild(d); }
+    var cols = m.columns || [], rows = m.data || [];
+    var h = "<h4>DDC debug — what SAS Visual Analytics sent</h4>";
+    h += "resultName: <b>" + (m.resultName || "(none)") + "</b><br>";
+    h += "columns: <b>" + cols.length + "</b> &nbsp; rows: <b class='" +
+         (rows.length ? "ok" : "bad") + "'>" + rows.length + "</b><br><br>";
+
+    if (!rows.length) {
+      h += "<span class='bad'>The query returned NO ROWS, so every {n} " +
+           "placeholder renders empty.<br>See the notes below.</span><br><br>";
+    }
+    h += "<table><tr><th>#</th><th>label</th><th>type</th><th>usage</th>" +
+         "<th>row&nbsp;1 value</th><th>-&gt;</th></tr>";
+    cols.forEach(function (c, i) {
+      var v = rows.length ? rows[0][i] : "";
+      h += "<tr><td>" + (i + 1) + "</td><td>" + esc(c.label || c.name) + "</td><td>" +
+           esc(c.type || "") + "</td><td>" + esc(c.usage || "") + "</td><td>" +
+           esc(String(v)) + "</td><td>{" + (i + 1) + "}</td></tr>";
+    });
+    h += "</table>";
+    h += "template: <code>" + esc(TEMPLATE) + "</code>";
+    d.innerHTML = h;
+  }
+
   function onMessage(ev) {
     var m = ev.data;
     if (!m || typeof m !== "object" || !m.columns || !m.data) return;
+    if (DEBUG) { debugDump(m); return; }
     render((m.data && m.data[0]) || []);   // single aggregated row
   }
   window.addEventListener("message", onMessage, false);
@@ -296,9 +368,10 @@
       columns: [
         { name: "m1", label: "Dangerous drivers", type: "number", usage: "quantitative" },
         { name: "m2", label: "Fines (bn AED)",    type: "number", usage: "quantitative" },
-        { name: "m3", label: "Avg tickets / year",  type: "number", usage: "quantitative" }
+        { name: "m3", label: "Tickets",             type: "number", usage: "quantitative" },
+        { name: "m4", label: "Years",               type: "number", usage: "quantitative" }
       ],
-      data: [[143765, 2070000000, 536]]
+      data: [[143765, 2070000000, 2144, 4]]
     }});
   }
 })();
