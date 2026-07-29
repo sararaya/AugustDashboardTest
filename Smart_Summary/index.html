@@ -16,19 +16,32 @@
 
   DATA ROLES  ("Variables" role, in order)
   ----------------------------------------
-    1. MEASURE -> {1}   Distinct count of Traffic No        e.g. 143,765
-    2. MEASURE -> {2}   Total fine value, RAW AED           e.g. 2070000000
-    3. MEASURE -> {3}   Count of TICKET_NO                  e.g. 2,462
-    4. MEASURE -> {4}   Distinct count of the year           e.g. 5
-                        ({3/4} divides them -> avg tickets per year)
+    1. Traffic No        -> {1:dc}     distinct drivers
+    2. TOTAL_FINE        -> {2:sum:c}  total fines, auto-scaled
+    3. TICKET_NO         -> counted by {3/4:cnt}
+    4. TICKET_DATE.Year  -> {3/4} divides tickets by years
+
+    Assign them as PLAIN data items - no aggregation dropdown, no calculated
+    items. The object aggregates whatever rows VA sends, so it does not
+    matter whether VA pre-aggregates or returns detail rows.
 
   PLACEHOLDER FORMATS
   -------------------
-    {n}      plain number with thousand separators        143,765
+    {n}      value from the first row, thousand separated
     {n:c}    auto-scaled with an Arabic magnitude word    2.07 مليار
              (ألف / مليون / مليار / تريليون chosen from the value itself)
     {n:c1}   same, forced to 1 decimal place
     {n:0}    plain, forced to 0 decimals
+    {n:sum}  SUM of column n across every row VA returns
+    {n:dc}   DISTINCT COUNT of column n across every row
+    {n:cnt}  number of rows returned (n is ignored)
+    {n:avg}  MEAN of column n
+    {n:sum:c} / {n:avg:c}   any aggregate can be followed by a format spec
+
+    Aggregates make the object immune to how VA groups the query: whether it
+    sends one pre-aggregated row or thousands of detail rows, the result is
+    the same. Prefer them over the bare {n} form.
+
     {n/m}    value n DIVIDED BY value m, e.g. tickets ÷ distinct years.
              Lets VA supply two plain aggregations instead of forcing you to
              build an aggregated-measure expression.
@@ -37,10 +50,6 @@
     Use {n:c} for money. Pass the RAW figure and let the object choose the
     word, so the sentence stays correct when a filter shrinks the total from
     billions to millions. Hard-coding "مليار" in the template would not.
-
-    Any number of measures works; they map to {1},{2},{3}... in role order.
-    Only the FIRST ROW of the result set is read, so the query should
-    aggregate to a single row.
 
   URL PARAMETERS (all optional)
   -----------------------------
@@ -53,7 +62,7 @@
     ?align=  center | start   (default center)
     ?font=0  skip the Google Fonts request and use system fonts
     ?debug=1 show exactly what VA sent: columns, roles, row count, values.
-             Use this first whenever the bubble comes up blank.
+             Use this first whenever the numbers look wrong.
 
   Because the template lives in the URL, this one hosted file can serve every
   summary bubble in the report.
@@ -121,7 +130,7 @@
   body.compact .bubble{padding:6px 12px 7px;gap:8px;border-radius:30px}
   body.compact .txt{padding-top:2px}
   body.compact .badge{padding:4px 11px 4px 13px}
-  /* if the pill cannot fit on one line, become a rounded block and wrap */
+
   /* wrapped: take the available width so the sentence can breathe, keep the
      badge pinned to the start of the line and the text right-aligned */
   body.wrapmode #wrap{align-items:stretch}
@@ -134,6 +143,9 @@
     flex:1 1 auto;text-align:right;
   }
 
+  /* visible signal that the aggregate is computed on partial data */
+  .bubble.truncated{outline-color:rgba(224,98,92,.55)}
+  .bubble.truncated .txt:after{content:" \26A0";color:#E0625C;font-weight:700}
   #msg{color:rgba(132,168,155,.5);font-size:12.5px}
   #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;
        font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
@@ -164,7 +176,7 @@
   });
 
   var DEFAULT_TEMPLATE =
-    "{1} سائقاً ضمن قائمة الخطر · قيمة مخالفات {2:c} درهم · بمعدل {3/4:0} مخالفة سنوياً.";
+    "{1:dc} سائقاً ضمن قائمة الخطر · قيمة مخالفات {2:sum:c} درهم · بمعدل {3/4:cnt:0} مخالفة سنوياً.";
 
   var TEMPLATE = (Q.t !== undefined && Q.t !== "") ? Q.t : DEFAULT_TEMPLATE;
   var BADGE    = (Q.badge !== undefined) ? Q.badge : "ملخّص ذكي";
@@ -230,27 +242,73 @@
     '<path d="M12 3.4 13.75 9l5.6 1.75L13.75 12.5 12 18.1l-1.75-5.6L4.65 10.75 10.25 9 12 3.4Z"/>' +
     '<path d="M18.7 3.5v2.5M19.95 4.75h-2.5"/></svg>';
 
+  var ROWS = [];
+  var TRUNCATED = false;   // VA capped the rows it sent -> aggregates unreliable
+
+  /* value from the first row - kept for backwards compatibility */
+  function cell(i) { return ROWS.length ? ROWS[0][i] : undefined; }
+
+  /* aggregate column i across EVERY row VA returned */
+  function aggregate(i, how) {
+    if (!ROWS.length) return undefined;
+    if (how === "cnt") return ROWS.length;
+    if (how === "first") return ROWS[0][i];
+    if (how === "dc") {
+      var seen = Object.create(null), k = 0;
+      for (var r = 0; r < ROWS.length; r++) {
+        var key = String(ROWS[r][i]);
+        if (!(key in seen)) { seen[key] = 1; k++; }
+      }
+      return k;
+    }
+    var acc = null, cnt = 0;
+    for (var j = 0; j < ROWS.length; j++) {
+      var x = Number(ROWS[j][i]);
+      if (isNaN(x)) continue;
+      cnt++;
+      if (acc === null) acc = x;
+      else if (how === "min") acc = Math.min(acc, x);
+      else if (how === "max") acc = Math.max(acc, x);
+      else acc += x;                       // sum / avg
+    }
+    if (acc === null) return undefined;
+    return (how === "avg" && cnt) ? acc / cnt : acc;
+  }
+
   function render(values) {
-    var html = esc(TEMPLATE).replace(
-      /\{(\d+)(?:\/(\d+))?(?::([a-z]?)(\d*))?\}/g,
-      function (_, n, den, kind, digits) {
-        var v = values[Number(n) - 1];
-        if (v === undefined || v === null || v === "") return "";
-        // {n/m} -> ratio, so two ordinary VA aggregations can stand in for
-        // a calculated ratio (e.g. count of tickets / distinct count of years)
-        if (den !== undefined) {
-          var d = Number(values[Number(den) - 1]);
-          if (!d || isNaN(d)) return "";
-          v = Number(v) / d;
-        }
-        var dp = (digits === "" || digits === undefined) ? undefined : parseInt(digits, 10);
-        var out = (kind === "c") ? fmtCompact(v, dp) : fmt(v, dp);
-        return "<b>" + esc(out) + "</b>";
+    // {n}  {n:agg}  {n:agg:fmt}  {n:fmt}  {n/m}  {n/m:fmt}
+    var RE = /\{(\d+)(?:\/(\d+))?((?::[a-z]*\d*)*)\}/g;
+    var AGGS = { sum: 1, dc: 1, cnt: 1, avg: 1, min: 1, max: 1, first: 1 };
+
+    var html = esc(TEMPLATE).replace(RE, function (_, n, den, specs) {
+      var parts = (specs || "").split(":").filter(function (x) { return x !== ""; });
+      var agg = null, kind = "", dp;
+      parts.forEach(function (tok) {
+        var name = tok.replace(/\d+$/, "");
+        if (AGGS[tok]) { agg = tok; return; }
+        if (AGGS[name]) { agg = name; return; }
+        // otherwise a format spec: "c", "c1", "0", "2"
+        var m2 = tok.match(/^([a-z]?)(\d*)$/);
+        if (m2) { if (m2[1]) kind = m2[1]; if (m2[2] !== "") dp = parseInt(m2[2], 10); }
       });
+
+      var v = agg ? aggregate(Number(n) - 1, agg) : cell(Number(n) - 1);
+      if (v === undefined || v === null || v === "") return "";
+
+      if (den !== undefined) {
+        var d = agg ? aggregate(Number(den) - 1, agg) : cell(Number(den) - 1);
+        d = Number(d);
+        if (!d || isNaN(d)) return "";
+        v = Number(v) / d;
+      }
+      var out = (kind === "c") ? fmtCompact(v, dp) : fmt(v, dp);
+      return "<b>" + esc(out) + "</b>";
+    });
     html = html.replace(/\s·\s/g, ' <span class="sep">·</span> ');
 
     wrap.innerHTML =
-      '<div class="bubble">' +
+      '<div class="bubble' + (TRUNCATED ? " truncated" : "") + '"' +
+      (TRUNCATED ? ' title="VA delivered only part of the data, so these totals are partial."' : "") + '>' +
         '<span class="txt">' + html + "</span>" +
         (BADGE ? '<span class="badge">' + esc(BADGE) + SPARK + "</span>" : "") +
       "</div>";
@@ -259,10 +317,10 @@
 
   /* ----------------------------------------------------------------------
      Auto-fit to the DDC frame.
-     1. try the base size on one line
-     2. step the type down until the pill fits the width
-     3. only if it still will not fit at the minimum size, allow wrapping and
-        step down again until it fits the height too
+     1. full size on one line
+     2. prefer WRAPPING at full size over shrinking to unreadable text
+     3. shrink while wrapped if still too tall
+     4. single line shrunk, last resort for very short frames
      Runs inside requestAnimationFrame so a resize drag does not thrash layout.
      ---------------------------------------------------------------------- */
   function setSize(px) {
@@ -323,12 +381,19 @@
     var cols = m.columns || [], rows = m.data || [];
     var h = "<h4>DDC debug — what SAS Visual Analytics sent</h4>";
     h += "resultName: <b>" + (m.resultName || "(none)") + "</b><br>";
+    if (m.rowCount !== undefined || m.availableRowCount !== undefined) {
+      var trunc = m.availableRowCount > m.rowCount;
+      h += "rowCount: <b>" + m.rowCount + "</b> of availableRowCount: <b class='" +
+           (trunc ? "bad" : "ok") + "'>" + m.availableRowCount + "</b>" +
+           (trunc ? " <span class='bad'>&larr; TRUNCATED, aggregates will be partial</span>" : "") +
+           "<br>";
+    }
     h += "columns: <b>" + cols.length + "</b> &nbsp; rows: <b class='" +
          (rows.length ? "ok" : "bad") + "'>" + rows.length + "</b><br><br>";
 
     if (!rows.length) {
       h += "<span class='bad'>The query returned NO ROWS, so every {n} " +
-           "placeholder renders empty.<br>See the notes below.</span><br><br>";
+           "placeholder renders empty.</span><br><br>";
     }
     h += "<table><tr><th>#</th><th>label</th><th>type</th><th>usage</th>" +
          "<th>row&nbsp;1 value</th><th>-&gt;</th></tr>";
@@ -346,8 +411,19 @@
   function onMessage(ev) {
     var m = ev.data;
     if (!m || typeof m !== "object" || !m.columns || !m.data) return;
+    ROWS = m.data || [];
+    // VA limits the rows delivered to a DDC. If it had more to give, any
+    // aggregate computed here is a partial figure - say so rather than
+    // quietly publishing a wrong number.
+    TRUNCATED = !!(m.availableRowCount && m.rowCount &&
+                   m.availableRowCount > m.rowCount);
+    if (TRUNCATED) {
+      console.warn("[Smart Summary] VA sent " + m.rowCount + " of " +
+        m.availableRowCount + " rows - aggregates are partial. " +
+        "Pre-aggregate in the data source, or assign fewer categories.");
+    }
     if (DEBUG) { debugDump(m); return; }
-    render((m.data && m.data[0]) || []);   // single aggregated row
+    render(ROWS[0] || []);
   }
   window.addEventListener("message", onMessage, false);
 
@@ -367,9 +443,9 @@
       resultName: "preview",
       columns: [
         { name: "m1", label: "Dangerous drivers", type: "number", usage: "quantitative" },
-        { name: "m2", label: "Fines (bn AED)",    type: "number", usage: "quantitative" },
-        { name: "m3", label: "Tickets",             type: "number", usage: "quantitative" },
-        { name: "m4", label: "Years",               type: "number", usage: "quantitative" }
+        { name: "m2", label: "Total fines (AED)", type: "number", usage: "quantitative" },
+        { name: "m3", label: "Tickets",           type: "number", usage: "quantitative" },
+        { name: "m4", label: "Years",             type: "number", usage: "quantitative" }
       ],
       data: [[143765, 2070000000, 2144, 4]]
     }});
