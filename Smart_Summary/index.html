@@ -1,4 +1,274 @@
-var AGGS2 = { sum: 1, dc: 1, cnt: 1, avg: 1, min: 1, max: 1, first: 1 };
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ملخّص ذكي — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content            VERSION v6
+  ================================================================
+  "Smart summary" pill. Design tokens from the Figma export:
+    --color-spring-green-39  #00C993   values, badge text
+    --color-spring-green-59  #84A89B   body text
+    bubble  rgba(0,201,147,.05) + 1px rgba(0,201,147,.20) outline, r=50px
+    badge   rgba(0,201,147,.06) + 1px rgba(0,201,147,.20) outline, r=20px
+    type    Tajawal 700 @16px (sentence), Tajawal 400 @14px (badge)
+
+  DATA ROLES  ("Variables" role, in this order)
+  ---------------------------------------------
+    1. Traffic No        -> {1:dc}         distinct drivers
+    2. TOTAL_FINE        -> {2:sum:c}      total fines, auto-scaled
+    3. TICKET_NO         -> {3:cnt/4:dc}   ticket count ...
+    4. TICKET_DATE.Year  -> ...            ... divided by distinct years
+
+  PREFER MEASURES ONLY. In VA a CATEGORY in the roles causes a GROUP BY, so
+  the query returns detail rows (one per ticket) rather than one aggregated
+  row. That still works here - the :dc / :sum / :cnt specs aggregate them -
+  but VA caps how many rows it delivers, so on a large table the totals can
+  be partial. With measures only, VA returns exactly ONE row of grand totals:
+  no row limit, no truncation, and still filter-reactive.
+
+  If a partial result is detected the bubble outlines red and shows a warning
+  glyph rather than quietly publishing a wrong number.
+
+  Note on "drivers on the danger list": this table is already scoped to
+  dangerous drivers, so a distinct count of Traffic No is the whole registry.
+  To count only high-risk drivers instead, put an OBJECT FILTER on the DDC
+  (e.g. DANGER_CATEGORY >= 3) - filters apply before the data is sent.
+
+  PLACEHOLDERS
+  ------------
+    {n}             value of item n (from the first row)
+    {n:c}           auto-scaled Arabic magnitude word (ألف/مليون/مليار/تريليون)
+    {n:c1} {n:0}    force decimal places
+    {n:sum} {n:dc} {n:cnt} {n:avg} {n:min} {n:max}
+                    aggregate across detail rows (ignored if VA sent one row)
+    {n/m}           ratio
+    {n:cnt/m:dc:0}  EACH SIDE takes its own aggregate. Writing {n/m:cnt}
+                    applies cnt to both sides and always yields 1.
+
+    Use {n:c} for money and pass the RAW figure, so the sentence stays correct
+    when a filter shrinks the total from billions to millions. Hard-coding
+    "مليار" in the template would not.
+
+  URL PARAMETERS (all optional)
+  -----------------------------
+    ?t=      URL-encoded sentence template
+    ?badge=  badge label (default "ملخّص ذكي"; pass empty to hide)
+    ?dp=     decimal places for non-whole numbers (default 2)
+    ?size=   starting font size in px (default 16)
+    ?min=    smallest font size auto-fit may shrink to (default 10)
+    ?scale=  ar | en | none    magnitude words for {n:c}
+    ?align=  center | start    (default center)
+    ?font=0  skip the Google Fonts request
+    ?debug=1 show what VA sent: version, row count, columns, values
+
+  Because the template lives in the URL, this one hosted file can serve every
+  summary bubble in the report.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap">
+<style>
+  :root{
+    --sg-39:#00C993;          /* spring-green-39 : values, badge */
+    --sg-59:#84A89B;          /* spring-green-59 : body text     */
+    --sg-87:#CFEEE2;
+    --sg-39-05:rgba(0,201,147,.05);
+    --sg-39-06:rgba(0,201,147,.06);
+    --sg-39-20:rgba(0,201,147,.20);
+    --size:16px;
+    --fonts:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;overflow:hidden;color:var(--sg-59);
+       font-family:var(--fonts);-webkit-font-smoothing:antialiased}
+  #wrap{height:100%;width:100%;min-height:0;min-width:0;padding:6px;
+        display:flex;align-items:center;justify-content:center}
+  body.start #wrap{justify-content:flex-start}
+
+  .bubble{
+    display:inline-flex;align-items:center;gap:12px;
+    max-width:100%;min-width:0;
+    padding:8px 16px 10px 16px;
+    background:var(--sg-39-05);
+    border-radius:50px;
+    outline:1px var(--sg-39-20) solid;outline-offset:-1px;
+    animation:rise .45s cubic-bezier(.22,.9,.3,1) both;
+  }
+  @keyframes rise{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.bubble{animation:none}}
+
+  .txt{
+    min-width:0;padding-top:6px;
+    font-size:var(--size);font-weight:700;line-height:1.5;
+    color:var(--sg-59);
+    text-align:right;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .txt b{color:var(--sg-39);font-weight:700;font-variant-numeric:tabular-nums}
+  .txt .sep{color:rgba(132,168,155,.55);padding:0 1px}
+
+  .badge{
+    display:inline-flex;align-items:center;justify-content:flex-end;gap:4px;flex:none;
+    padding:6px 16px 6px 20px;
+    background:var(--sg-39-06);
+    border-radius:20px;
+    outline:1px var(--sg-39-20) solid;outline-offset:-1px;
+    color:var(--sg-39);
+    font-size:calc(var(--size) - 2px);font-weight:400;line-height:1.66;
+    white-space:nowrap;
+  }
+  .badge svg{width:16px;height:16px;flex:none;color:#04CA95}
+
+  body.compact .bubble{padding:6px 12px 7px;gap:8px;border-radius:30px}
+  body.compact .txt{padding-top:2px}
+  body.compact .badge{padding:4px 11px 4px 13px}
+
+  body.wrapmode #wrap{align-items:stretch}
+  body.wrapmode .bubble{
+    border-radius:18px;align-items:flex-start;padding:12px 16px;
+    width:100%;max-width:100%;
+  }
+  body.wrapmode .txt{
+    white-space:normal;text-overflow:clip;overflow:visible;
+    flex:1 1 auto;text-align:right;
+  }
+
+  .bubble.truncated{outline-color:rgba(224,98,92,.55)}
+  .bubble.truncated .txt:after{content:" \26A0";color:#E0625C;font-weight:700}
+
+  #msg{color:rgba(132,168,155,.5);font-size:12.5px}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.96);direction:ltr;text-align:left}
+  #dbg h4{margin:0 0 6px;font-size:12px;color:#00C993}
+  #dbg table{border-collapse:collapse;margin:4px 0 10px;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(0,201,147,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:#00C993;font-weight:600}
+  #dbg .bad{color:#FF6B6B}
+  #dbg .ok{color:#00C993}
+</style>
+</head>
+<body>
+<div id="wrap"><span id="msg">في انتظار البيانات…</span></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var VERSION = "v6 2026-07-29";
+  console.log("[Smart Summary] " + VERSION);
+
+  /* ---------------- url params ---------------- */
+  var Q = {};
+  location.search.replace(/^\?/, "").split("&").forEach(function (kv) {
+    if (!kv) return;
+    var i = kv.indexOf("=");
+    var k = decodeURIComponent(i < 0 ? kv : kv.slice(0, i));
+    var v = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1).replace(/\+/g, " "));
+    Q[k] = v;
+  });
+
+  var DEFAULT_TEMPLATE =
+    "{1:dc} سائقاً ضمن قائمة الخطر · قيمة مخالفات {2:sum:c} درهم · بمعدل {3:cnt/4:dc:0} مخالفة سنوياً.";
+
+  var TEMPLATE = (Q.t !== undefined && Q.t !== "") ? Q.t : DEFAULT_TEMPLATE;
+  var BADGE    = (Q.badge !== undefined) ? Q.badge : "ملخّص ذكي";
+  var DP       = (Q.dp !== undefined) ? parseInt(Q.dp, 10) : 2;
+  if (isNaN(DP)) DP = 2;
+  var BASE  = Q.size ? parseInt(Q.size, 10) : 16;
+  var MINSZ = Q.min ? parseInt(Q.min, 10) : 10;
+  if (isNaN(BASE)  || BASE  < 6) BASE  = 16;
+  if (isNaN(MINSZ) || MINSZ < 6) MINSZ = 10;
+  var SCALE = Q.scale || "ar";
+  if (Q.align === "start") document.body.classList.add("start");
+  if (Q.font === "0") { var g = document.getElementById("gfont"); if (g) g.remove(); }
+
+  var wrap = document.getElementById("wrap");
+
+  var UNITS = {
+    ar: [[1e12, "تريليون"], [1e9, "مليار"], [1e6, "مليون"], [1e3, "ألف"]],
+    en: [[1e12, "trillion"], [1e9, "billion"], [1e6, "million"], [1e3, "thousand"]],
+    none: []
+  };
+
+  function num(n, dp) { return n.toLocaleString("en-US", { maximumFractionDigits: dp }); }
+
+  function fmt(v, dp) {
+    if (v === null || v === undefined || v === "") return "";
+    var n = Number(v);
+    if (isNaN(n)) return String(v);
+    var whole = Math.abs(n % 1) < 1e-9;
+    return num(n, whole ? 0 : (dp === undefined ? DP : dp));
+  }
+
+  /* picks the magnitude word from the value itself, so the sentence stays
+     true when a filter changes the order of magnitude */
+  function fmtCompact(v, dp) {
+    if (v === null || v === undefined || v === "") return "";
+    var n = Number(v);
+    if (isNaN(n)) return String(v);
+    var tiers = UNITS[SCALE] || UNITS.ar, a = Math.abs(n);
+    for (var i = 0; i < tiers.length; i++) {
+      if (a >= tiers[i][0]) {
+        var x = n / tiers[i][0];
+        var d = (dp !== undefined) ? dp : (Math.abs(x) >= 100 ? 1 : 2);
+        return num(x, d) + " " + tiers[i][1];
+      }
+    }
+    return num(n, Math.abs(n % 1) < 1e-9 ? 0 : (dp === undefined ? DP : dp));
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  /* the Figma export used an SF Pro private-use glyph, which only renders on
+     macOS - an inline SVG sparkle is equivalent and portable */
+  var SPARK =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M12 3.4 13.75 9l5.6 1.75L13.75 12.5 12 18.1l-1.75-5.6L4.65 10.75 10.25 9 12 3.4Z"/>' +
+    '<path d="M18.7 3.5v2.5M19.95 4.75h-2.5"/></svg>';
+
+  var ROWS = [];
+  var TRUNCATED = false;
+
+  function cell(i) { return ROWS.length ? ROWS[0][i] : undefined; }
+
+  /* aggregate column i across EVERY row VA returned */
+  function aggregate(i, how) {
+    if (!ROWS.length) return undefined;
+    if (how === "cnt")   return ROWS.length;
+    if (how === "first") return ROWS[0][i];
+    if (how === "dc") {
+      var seen = Object.create(null), k = 0;
+      for (var r = 0; r < ROWS.length; r++) {
+        var key = String(ROWS[r][i]);
+        if (!(key in seen)) { seen[key] = 1; k++; }
+      }
+      return k;
+    }
+    var acc = null, cnt = 0;
+    for (var j = 0; j < ROWS.length; j++) {
+      var x = Number(ROWS[j][i]);
+      if (isNaN(x)) continue;
+      cnt++;
+      if (acc === null) acc = x;
+      else if (how === "min") acc = Math.min(acc, x);
+      else if (how === "max") acc = Math.max(acc, x);
+      else acc += x;                       // sum / avg
+    }
+    if (acc === null) return undefined;
+    return (how === "avg" && cnt) ? acc / cnt : acc;
+  }
+
+  var AGGS = { sum: 1, dc: 1, cnt: 1, avg: 1, min: 1, max: 1, first: 1 };
 
   /* parse one side of a placeholder: "2", "2:sum", "2:sum:c", "4:dc" */
   function parseRef(str) {
@@ -7,8 +277,8 @@ var AGGS2 = { sum: 1, dc: 1, cnt: 1, avg: 1, min: 1, max: 1, first: 1 };
     t.slice(1).forEach(function (tok) {
       if (!tok) return;
       var base = tok.replace(/\d+$/, "");
-      if (AGGS2[tok])  { ref.agg = tok;  return; }
-      if (AGGS2[base]) { ref.agg = base; return; }
+      if (AGGS[tok])  { ref.agg = tok;  return; }
+      if (AGGS[base]) { ref.agg = base; return; }
       var m = tok.match(/^([a-z]?)(\d*)$/);
       if (m) { if (m[1]) ref.kind = m[1]; if (m[2] !== "") ref.dp = parseInt(m[2], 10); }
     });
@@ -45,6 +315,7 @@ var AGGS2 = { sum: 1, dc: 1, cnt: 1, avg: 1, min: 1, max: 1, first: 1 };
       return "<b>" + esc(out) + "</b>";
     }).replace(/\s·\s/g, ' <span class="sep">·</span> ');
 
+    // badge FIRST so that in RTL it sits on the right-hand side
     wrap.innerHTML =
       '<div class="bubble' + (TRUNCATED ? " truncated" : "") + '"' +
       (TRUNCATED ? ' title="VA delivered only part of the data, so these totals are partial."' : "") + '>' +
@@ -53,3 +324,121 @@ var AGGS2 = { sum: 1, dc: 1, cnt: 1, avg: 1, min: 1, max: 1, first: 1 };
       "</div>";
     fit();
   }
+
+  /* ----------------------------------------------------------------------
+     Auto-fit to the DDC frame.
+     1. full size on one line
+     2. prefer WRAPPING at full size over shrinking to unreadable text
+     3. shrink while wrapped if still too tall
+     4. single line shrunk, last resort for very short frames
+     ---------------------------------------------------------------------- */
+  function setSize(px) { document.documentElement.style.setProperty("--size", px + "px"); }
+  function fits(b, w, h) { return b.scrollWidth <= w + 0.5 && b.scrollHeight <= h + 0.5; }
+
+  function fit() {
+    var b = wrap.querySelector(".bubble");
+    if (!b) return;
+    var availW = wrap.clientWidth - 12, availH = wrap.clientHeight - 12;
+    if (availW <= 0 || availH <= 0) return;
+
+    document.body.classList.remove("wrapmode");
+    setSize(BASE);
+    if (fits(b, availW, availH)) return;
+
+    document.body.classList.add("wrapmode");
+    setSize(BASE);
+    if (fits(b, availW, availH)) return;
+
+    var size = BASE, guard = 0;
+    while (!fits(b, availW, availH) && size > MINSZ && guard++ < 60) { size -= 0.5; setSize(size); }
+    if (fits(b, availW, availH)) return;
+
+    document.body.classList.remove("wrapmode");
+    size = BASE; guard = 0; setSize(size);
+    while (!fits(b, availW, availH) && size > MINSZ && guard++ < 60) { size -= 0.5; setSize(size); }
+  }
+
+  var fitPending = false;
+  function scheduleFit() {
+    if (fitPending) return;
+    fitPending = true;
+    requestAnimationFrame(function () { fitPending = false; fit(); });
+  }
+
+  var DEBUG = Q.debug === "1";
+
+  function debugDump(m) {
+    var d = document.getElementById("dbg");
+    if (!d) { d = document.createElement("div"); d.id = "dbg"; document.body.appendChild(d); }
+    var cols = m.columns || [], rows = m.data || [];
+    var h = "<h4>DDC debug — what SAS Visual Analytics sent</h4>";
+    h += "file version: <b class='ok'>" + VERSION + "</b><br>";
+    h += "resultName: <b>" + (m.resultName || "(none)") + "</b><br>";
+    if (m.rowCount !== undefined || m.availableRowCount !== undefined) {
+      var trunc = m.availableRowCount > m.rowCount;
+      h += "rowCount: <b>" + m.rowCount + "</b> of availableRowCount: <b class='" +
+           (trunc ? "bad" : "ok") + "'>" + m.availableRowCount + "</b>" +
+           (trunc ? " <span class='bad'>&larr; TRUNCATED, aggregates are partial</span>" : "") +
+           "<br>";
+    }
+    h += "rows returned: <b class='" + (rows.length === 1 ? "ok" : "bad") + "'>" + rows.length +
+         "</b> " + (rows.length === 1
+           ? "(pre-aggregated - ideal)"
+           : "(DETAIL rows - a CATEGORY is in your roles)") + "<br><br>";
+    h += "<table><tr><th>#</th><th>label</th><th>type</th><th>usage</th>" +
+         "<th>row&nbsp;1 value</th><th>-&gt;</th></tr>";
+    cols.forEach(function (c, i) {
+      var v = rows.length ? rows[0][i] : "";
+      h += "<tr><td>" + (i + 1) + "</td><td>" + esc(c.label || c.name) + "</td><td>" +
+           esc(c.type || "") + "</td><td>" + esc(c.usage || "") + "</td><td>" +
+           esc(String(v)) + "</td><td>{" + (i + 1) + "}</td></tr>";
+    });
+    h += "</table>template: <code>" + esc(TEMPLATE) + "</code>";
+    d.innerHTML = h;
+  }
+
+  function onMessage(ev) {
+    var m = ev.data;
+    if (!m || typeof m !== "object" || !m.columns || !m.data) return;
+    ROWS = m.data || [];
+    // VA caps the rows delivered to a DDC. If it had more to give, any
+    // aggregate computed here is partial - flag it rather than publish it.
+    TRUNCATED = !!(m.availableRowCount && m.rowCount &&
+                   m.availableRowCount > m.rowCount);
+    if (TRUNCATED) {
+      console.warn("[Smart Summary] VA sent " + m.rowCount + " of " +
+        m.availableRowCount + " rows - aggregates are partial. " +
+        "Pre-aggregate in the data source, or remove categories from the roles.");
+    }
+    if (DEBUG) { debugDump(m); return; }
+    render();
+  }
+  window.addEventListener("message", onMessage, false);
+
+  function applyLayout() {
+    document.body.classList.toggle("compact", document.documentElement.clientHeight < 64);
+    scheduleFit();
+  }
+  if (window.ResizeObserver) new ResizeObserver(applyLayout).observe(document.documentElement);
+  window.addEventListener("resize", applyLayout, false);
+  // webfont swap changes metrics, so refit once Tajawal has loaded
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleFit);
+  applyLayout();
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window) {
+    onMessage({ data: {
+      resultName: "preview",
+      columns: [
+        { name: "m1", label: "Dangerous drivers", type: "number", usage: "quantitative" },
+        { name: "m2", label: "Total fines (AED)", type: "number", usage: "quantitative" },
+        { name: "m3", label: "Tickets",           type: "number", usage: "quantitative" },
+        { name: "m4", label: "Years",             type: "number", usage: "quantitative" }
+      ],
+      data: [[143765, 2070000000, 2144, 4]]
+    }});
+  }
+})();
+</script>
+</body>
+</html>
