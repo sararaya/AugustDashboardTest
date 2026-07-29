@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Top N Bars — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content     Bars_TopN  v1 2026-07-29
+  =======================================================================
+  Horizontal bars for ONE category/measure pair, with a top-3 / top-5 /
+  top-10 switcher. Transparent background, no card or title - the VA
+  container supplies those.
+
+  DATA ROLES  ("Variables" role)
+  ------------------------------
+    1. Category   required    e.g. OFFENCE_DESCRIPTION_A
+    2. Measure    required    e.g. TICKET_NO with aggregation COUNT
+                              (VA defaults numeric items to SUM - summing an
+                               ID column gives billions)
+
+  Only the first category and first measure are used. For several charts in
+  one object use the Bars component instead.
+
+  SIZING
+  ------
+  Rows shrink to fit the container down to a readable floor, then the list
+  scrolls. The default button is the LARGEST option that fits without
+  scrolling, so the object stays honest at any size - pin it with ?active=10.
+
+  SIZING & SCROLL
+  ---------------
+  Rows keep a fixed, readable height. If the chosen N does not fit the
+  container the list SCROLLS - bars are never dropped or shrunk away.
+
+  URL PARAMETERS
+  --------------
+    ?tops=3,5,10    the switcher options (default 3,5,10 - all always shown,
+                    even when the data has fewer distinct values)
+    ?active=10      which option starts selected: 3 | 5 | 10 (default: largest)
+    ?word=أعلى      button prefix (default أعلى)
+    ?sort=desc      desc | asc
+    ?fmt=plain      plain | c (compact: ألف / مليون)
+    ?select=0       disable click-to-filter
+    ?size=13        label font size in px
+    ?btn=11         switcher font size in px (default 11)
+    ?font=0         skip the Google Fonts request
+    ?debug=1        show the full ranking and the fitting maths
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap">
+<style>
+  :root{
+    --mint:#00C993; --mint-2:#2BE5A8;
+    --track:rgba(255,255,255,.07);
+    --label:#DCEFE8; --value:#00C993; --muted:#7E948C;
+    --btn-bg:rgba(255,255,255,.04); --btn-line:rgba(255,255,255,.07);
+    --size:13px; --btnsize:11px; --bar:8px; --gap:11px;
+    --ar:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;color:var(--label);font-family:var(--ar);
+       overflow:hidden;-webkit-font-smoothing:antialiased}
+  #root{height:100%;width:100%;min-height:0;min-width:0;
+        display:flex;flex-direction:column;gap:7px;padding:0 2px 2px}
+
+  /* dir=rtl means flex-start is the RIGHT edge - which is where the Arabic
+     card title lives. flex-end pins the switch to the physical LEFT.
+     Kept deliberately small and flush to the top so it sits level with the
+     container's title and leaves the vertical space to the bars. */
+  #tabs{flex:none;display:flex;align-self:flex-end;gap:3px;padding:2.5px;
+        background:var(--btn-bg);border:1px solid var(--btn-line);border-radius:9px}
+  #tabs button{font-family:inherit;font-size:var(--btnsize);font-weight:500;
+        padding:3.5px 11px;border-radius:6.5px;border:0;cursor:pointer;
+        background:transparent;color:var(--muted);white-space:nowrap;line-height:1.5;
+        transition:background .18s ease,color .18s ease}
+  #tabs button:hover{color:var(--label)}
+  #tabs button.on{background:var(--mint);color:#062B21;font-weight:700}
+
+  #rows{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;
+        display:flex;flex-direction:column;gap:14px;padding-inline-end:4px}
+  /* slim scrollbar, only visible when the chosen N cannot fit */
+  #rows::-webkit-scrollbar{width:4px}
+  #rows::-webkit-scrollbar-track{background:transparent}
+  #rows::-webkit-scrollbar-thumb{background:rgba(0,201,147,.35);border-radius:99px}
+  #rows{scrollbar-width:thin;scrollbar-color:rgba(0,201,147,.35) transparent}
+
+  .row{display:flex;flex-direction:column;gap:5px;flex:none;cursor:pointer}
+  .row.noclick{cursor:default}
+  .row .top{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+  .row .lbl{font-size:var(--size);color:var(--label);font-weight:500;
+            min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+            text-align:right}
+  .row .val{font-size:var(--size);color:var(--value);font-weight:700;
+            font-variant-numeric:tabular-nums;flex:none;direction:ltr}
+  .track{height:var(--bar);border-radius:999px;background:var(--track);
+         overflow:hidden;display:flex;justify-content:flex-start}
+  .fill{height:100%;border-radius:999px;
+        background:linear-gradient(90deg,var(--mint) 0%,var(--mint-2) 100%);
+        transition:width .45s cubic-bezier(.22,.9,.3,1);min-width:4px}
+  .row:hover .fill{filter:brightness(1.14)}
+  .row.sel .fill{box-shadow:0 0 0 1.5px var(--mint-2)}
+  .row.dim{opacity:.42}
+
+  #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+       color:var(--muted);font-size:12.5px;pointer-events:none}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;z-index:9;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.97);direction:ltr;text-align:left}
+  #dbg h4{margin:8px 0 4px;font-size:12px;color:var(--mint)}
+  #dbg table{border-collapse:collapse;margin:4px 0;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(0,201,147,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:var(--mint);font-weight:600}
+  #dbg .bad{color:#FF6B6B} #dbg .ok{color:var(--mint)}
+</style>
+</head>
+<body>
+<div id="root">
+  <div id="tabs" style="display:none"></div>
+  <div id="rows"></div>
+</div>
+<div id="msg">في انتظار البيانات…</div>
+
+<script>
+(function(){
+  "use strict";
+  var VERSION = "Bars_TopN v1 2026-07-29";
+  console.log("[" + VERSION + "]");
+
+  var Q = {};
+  location.search.replace(/^\?/,"").split("&").forEach(function(kv){
+    if(!kv) return;
+    var i = kv.indexOf("=");
+    var k = decodeURIComponent(i<0?kv:kv.slice(0,i));
+    var v = i<0?"":decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));
+    Q[k]=v;
+  });
+  if (Q.font === "0"){ var g=document.getElementById("gfont"); if(g) g.remove(); }
+  if (Q.size) document.documentElement.style.setProperty("--size", parseInt(Q.size,10)+"px");
+  if (Q.btn)  document.documentElement.style.setProperty("--btnsize", parseInt(Q.btn,10)+"px");
+
+  var TOPS = (Q.tops || "3,5,10").split(",")
+               .map(function(x){ return parseInt(x,10); })
+               .filter(function(x){ return x > 0; })
+               .sort(function(a,b){ return a-b; });
+  if (!TOPS.length) TOPS = [3,5,10];
+
+  var WORD       = Q.word !== undefined ? Q.word : "أعلى";
+  var SORT       = Q.sort || "desc";
+  var COMPACT    = Q.fmt === "c";
+  var SELECTABLE = Q.select !== "0";
+  var DEBUG      = Q.debug === "1";
+  var ACTIVE     = null;                   // null = auto-pick on first render
+  var PINNED     = (Q.active && Q.active !== "auto") ? parseInt(Q.active,10) : null;
+
+  var TIERS = [[1e9,"مليار"],[1e6,"مليون"],[1e3,"ألف"]];
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+  function num(n,dp){ return Number(n).toLocaleString("en-US",{maximumFractionDigits:dp}); }
+  function fmtVal(v){
+    var n = Number(v); if (isNaN(n)) return String(v);
+    if (COMPACT){
+      var a = Math.abs(n);
+      for (var i=0;i<TIERS.length;i++){
+        if (a >= TIERS[i][0]) return num(n/TIERS[i][0], Math.abs(n/TIERS[i][0])>=100?0:1)+" "+TIERS[i][1];
+      }
+    }
+    return num(n, Math.abs(n%1)<1e-9 ? 0 : 1);
+  }
+
+  var ITEMS = [], RESULT = null, SEL = {}, MEASLABEL = "", CATLABEL = "";
+
+  function rollUp(m){
+    var cols = m.columns || [], rows = m.data || [];
+    var ci = -1, mi = -1;
+    cols.forEach(function(c,i){
+      var u = String(c.usage||"").toLowerCase(), t = String(c.type||"").toLowerCase();
+      var isM = u === "quantitative" || (!u && t === "number");
+      if (isM){ if (mi === -1) mi = i; }
+      else if (ci === -1) ci = i;
+    });
+    if (ci === -1) ci = 0;
+    if (mi === -1) mi = (ci === 0 ? 1 : 0);
+    CATLABEL  = (cols[ci] && (cols[ci].label || cols[ci].name)) || "";
+    MEASLABEL = (cols[mi] && (cols[mi].label || cols[mi].name)) || "";
+
+    var acc = {}, order = [], src = {};
+    rows.forEach(function(r, ri){
+      var k = String(r[ci]);
+      if (k === "" || k === "null" || k === "undefined") return;
+      var v = Number(r[mi]); if (isNaN(v)) v = 0;
+      if (!(k in acc)){ acc[k] = 0; order.push(k); src[k] = []; }
+      acc[k] += v; src[k].push(ri);
+    });
+    var items = order.map(function(k){ return {k:k, v:acc[k], rows:src[k]}; });
+    items.sort(function(a,b){ return SORT === "asc" ? a.v - b.v : b.v - a.v; });
+    return items;
+  }
+
+  /* Rows keep a fixed height; if N of them do not fit, the container scrolls.
+     ACTIVE therefore never changes just because the object got shorter. */
+  function pickDefault(){
+    return PINNED || TOPS[TOPS.length-1];
+  }
+
+  /* uniform proportional bar length - every rank the same colour */
+  function lengths(items){
+    var max = items.reduce(function(a,b){ return Math.max(a, b.v); }, 0) || 1;
+    return items.map(function(it){ return Math.max(0, it.v) / max * 100; });
+  }
+
+  function render(){
+    var host = document.getElementById("rows");
+    var tabs = document.getElementById("tabs");
+    document.getElementById("msg").style.display = ITEMS.length ? "none" : "flex";
+    if (!ITEMS.length){ host.innerHTML = ""; tabs.style.display = "none"; return; }
+
+    if (ACTIVE === null) ACTIVE = pickDefault();
+
+    // Always offer every configured option. If the data has fewer distinct
+    // values than the chosen N, the chart simply shows all of them - the
+    // button is never hidden, so the control stays in a predictable place.
+    if (TOPS.indexOf(ACTIVE) === -1) ACTIVE = TOPS[TOPS.length-1];
+
+    tabs.style.display = TOPS.length > 1 ? "flex" : "none";
+    tabs.innerHTML = TOPS.map(function(n){
+      return '<button type="button" data-n="' + n + '"' +
+             (n === ACTIVE ? ' class="on"' : "") + ">" +
+             (WORD ? esc(WORD) + " " : "") + n + "</button>";
+    }).join("");
+
+    var shown = ITEMS.slice(0, Math.min(ACTIVE, ITEMS.length));
+    var lens = lengths(shown);
+    var anySel = Object.keys(SEL).length > 0;
+    host.innerHTML = shown.map(function(it, i){
+      var cls = "row" + (SELECTABLE ? "" : " noclick") +
+                (SEL[it.k] ? " sel" : "") + (anySel && !SEL[it.k] ? " dim" : "");
+      return '<div class="' + cls + '" data-k="' + esc(it.k) + '">' +
+               '<div class="top">' +
+                 '<span class="val">' + esc(fmtVal(it.v)) + "</span>" +
+                 '<span class="lbl" title="' + esc(it.k) + '">' + esc(it.k) + "</span>" +
+               "</div>" +
+               '<div class="track"><span class="fill" style="width:' +
+                 Math.max(2, lens[i]).toFixed(2) + '%"></span></div>' +
+             "</div>";
+    }).join("");
+  }
+
+  function toggle(key, additive){
+    if (!SELECTABLE) return;
+    if (!additive){
+      var only = SEL[key] && Object.keys(SEL).length === 1;
+      SEL = {};
+      if (!only) SEL[key] = true;
+    } else {
+      if (SEL[key]) delete SEL[key]; else SEL[key] = true;
+    }
+    var sels = [];
+    ITEMS.forEach(function(it){
+      if (SEL[it.k]) it.rows.forEach(function(ri){ sels.push({row: ri}); });
+    });
+    try { window.parent.postMessage({ resultName: RESULT, selections: sels }, "*"); } catch(e){}
+    render();
+  }
+
+  document.addEventListener("click", function(ev){
+    var b = ev.target.closest("#tabs button");
+    if (b){ ACTIVE = parseInt(b.getAttribute("data-n"),10); render(); return; }
+    var r = ev.target.closest(".row");
+    if (r && SELECTABLE) toggle(r.getAttribute("data-k"), ev.ctrlKey || ev.metaKey || ev.shiftKey);
+  });
+
+  function dump(m){
+    var d = document.getElementById("dbg");
+    if(!d){ d=document.createElement("div"); d.id="dbg"; document.body.appendChild(d); }
+    var h = "<h4>Bars_TopN debug</h4>version: <b class='ok'>"+VERSION+"</b><br>";
+    h += "category: <b>"+esc(CATLABEL)+"</b> &nbsp; measure: <b>"+esc(MEASLABEL)+"</b><br>";
+    h += "rows from VA: <b>"+(m.data||[]).length+"</b>";
+    if (m.availableRowCount !== undefined && m.availableRowCount > m.rowCount)
+      h += " <span class='bad'>of "+m.availableRowCount+" - TRUNCATED, ranking may be wrong</span>";
+    h += "<br>distinct values: <b>"+ITEMS.length+"</b><br>";
+    h += "active: <b>"+(ACTIVE||pickDefault())+"</b>"+(PINNED?" (pinned)":" (default: largest)")+
+         " &nbsp; rows scroll if they do not fit<br>";
+    h += "<h4>ranking</h4><table><tr><th>#</th><th>value</th><th>measure</th></tr>";
+    ITEMS.slice(0,12).forEach(function(it,i){
+      h += "<tr><td>"+(i+1)+"</td><td>"+esc(it.k)+"</td><td>"+num(it.v,1)+"</td></tr>";
+    });
+    h += "</table>";
+    if (ITEMS.length && ITEMS[0].v > 1e8)
+      h += "<br><span class='bad'>values look implausibly large - the measure may be " +
+           "aggregating an ID column as SUM rather than COUNT.</span>";
+    d.innerHTML = h;
+  }
+
+  function onMessage(ev){
+    var m = ev.data;
+    if (!m || typeof m !== "object" || !m.columns || !m.data) return;
+    RESULT = m.resultName || RESULT;
+    ITEMS = rollUp(m);
+    SEL = {};
+    if (m.selections && m.selections.length){
+      var want = {};
+      m.selections.forEach(function(s){ want[s.row] = 1; });
+      ITEMS.forEach(function(it){
+        if (it.rows.some(function(ri){ return want[ri]; })) SEL[it.k] = true;
+      });
+    }
+    if (DEBUG){ if (ACTIVE === null) ACTIVE = pickDefault(); dump(m); return; }
+    render();
+  }
+  window.addEventListener("message", onMessage, false);
+
+  /* resize does not change which N is shown - the list simply scrolls */
+  var pend = false;
+  function onResize(){
+    if (pend) return; pend = true;
+    requestAnimationFrame(function(){ pend = false; if (ITEMS.length) render(); });
+  }
+  if (window.ResizeObserver) new ResizeObserver(onResize).observe(document.documentElement);
+  window.addEventListener("resize", onResize, false);
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window){
+    onMessage({ data:{
+      resultName:"preview",
+      columns:[
+        {name:"c1",label:"OFFENCE_DESCRIPTION_A",type:"string",usage:"categorical"},
+        {name:"m1",label:"Tickets",type:"number",usage:"quantitative"}
+      ],
+      data:[
+        ["عدم التزام المركبة الخفيفة بخط السير الإلزامي",2717502],
+        ["الانشغال عن الطريق أثناء قيادة المركبة",264671],
+        ["تجاوز الإشارة الضوئية الحمراء",105874],
+        ["تجاوز الحد الأقصى للسرعة المقررة",88411],
+        ["الوقوف وسط الطريق دون مبرر",87620],
+        ["القيادة برخصة منتهية",71240],
+        ["التجاوز الخطر",64180],
+        ["الدخول للطريق دون التأكد من خلوه",58330],
+        ["السير عكس اتجاه السير",41900],
+        ["الانحراف المفاجئ",33110],
+        ["إعاقة الحركة المرورية",28450]
+      ]
+    }});
+  }
+})();
+</script>
+</body>
+</html>
