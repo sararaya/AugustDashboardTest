@@ -1,456 +1,55 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ملخّص ذكي — SAS VA Data-Driven Content</title>
-<!--
-  SAS Visual Analytics — Data-Driven Content
-  ==========================================
-  "Smart summary" pill. Design tokens taken from the Figma export:
-    --color-spring-green-39  #00C993   values, badge text
-    --color-spring-green-59  #84A89B   body text
-    bubble  rgba(0,201,147,.05) + 1px rgba(0,201,147,.20) outline, r=50px
-    badge   rgba(0,201,147,.06) + 1px rgba(0,201,147,.20) outline, r=20px
-    type    Tajawal 700 @16px (sentence), Tajawal 400 @14px (badge)
+var AGGS2 = { sum: 1, dc: 1, cnt: 1, avg: 1, min: 1, max: 1, first: 1 };
 
-  DATA ROLES  ("Variables" role, in order)
-  ----------------------------------------
-    1. Traffic No        -> {1:dc}     distinct drivers
-    2. TOTAL_FINE        -> {2:sum:c}  total fines, auto-scaled
-    3. TICKET_NO         -> counted by {3/4:cnt}
-    4. TICKET_DATE.Year  -> {3/4} divides tickets by years
-
-    Assign them as PLAIN data items - no aggregation dropdown, no calculated
-    items. The object aggregates whatever rows VA sends, so it does not
-    matter whether VA pre-aggregates or returns detail rows.
-
-  PLACEHOLDER FORMATS
-  -------------------
-    {n}      value from the first row, thousand separated
-    {n:c}    auto-scaled with an Arabic magnitude word    2.07 مليار
-             (ألف / مليون / مليار / تريليون chosen from the value itself)
-    {n:c1}   same, forced to 1 decimal place
-    {n:0}    plain, forced to 0 decimals
-    {n:sum}  SUM of column n across every row VA returns
-    {n:dc}   DISTINCT COUNT of column n across every row
-    {n:cnt}  number of rows returned (n is ignored)
-    {n:avg}  MEAN of column n
-    {n:sum:c} / {n:avg:c}   any aggregate can be followed by a format spec
-
-    Aggregates make the object immune to how VA groups the query: whether it
-    sends one pre-aggregated row or thousands of detail rows, the result is
-    the same. Prefer them over the bare {n} form.
-
-    {n/m}    value n DIVIDED BY value m, e.g. tickets ÷ distinct years.
-             Lets VA supply two plain aggregations instead of forcing you to
-             build an aggregated-measure expression.
-    {n/m:0}  same, forced to 0 decimals
-
-    Use {n:c} for money. Pass the RAW figure and let the object choose the
-    word, so the sentence stays correct when a filter shrinks the total from
-    billions to millions. Hard-coding "مليار" in the template would not.
-
-  URL PARAMETERS (all optional)
-  -----------------------------
-    ?t=      URL-encoded sentence template using {1} {2} {3}
-    ?badge=  badge label (default "ملخّص ذكي"; pass empty to hide)
-    ?dp=     decimal places for non-whole numbers (default 2)
-    ?size=   starting font size in px (default 16)
-    ?min=    smallest font size auto-fit may shrink to (default 10)
-    ?scale=  ar | en | none   magnitude words for {n:c} (default ar)
-    ?align=  center | start   (default center)
-    ?font=0  skip the Google Fonts request and use system fonts
-    ?debug=1 show exactly what VA sent: columns, roles, row count, values.
-             Use this first whenever the numbers look wrong.
-
-  Because the template lives in the URL, this one hosted file can serve every
-  summary bubble in the report.
--->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link id="gfont" rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap">
-<style>
-  :root{
-    /* --- tokens lifted from the Figma export --- */
-    --sg-39:#00C993;          /* spring-green-39  : values, badge */
-    --sg-59:#84A89B;          /* spring-green-59  : body text     */
-    --sg-87:#CFEEE2;
-    --sg-39-05:rgba(0,201,147,.05);
-    --sg-39-06:rgba(0,201,147,.06);
-    --sg-39-20:rgba(0,201,147,.20);
-    --size:16px;
-    --fonts:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
-  }
-  *{box-sizing:border-box}
-  html,body{height:100%;margin:0}
-  body{background:transparent;overflow:hidden;color:var(--sg-59);
-       font-family:var(--fonts);-webkit-font-smoothing:antialiased}
-  #wrap{height:100%;width:100%;min-height:0;min-width:0;padding:6px;
-        display:flex;align-items:center;justify-content:center}
-  body.start #wrap{justify-content:flex-start}
-
-  .bubble{
-    display:inline-flex;align-items:center;gap:12px;
-    max-width:100%;min-width:0;
-    padding:8px 16px 10px 16px;              /* t r b l - per the export */
-    background:var(--sg-39-05);
-    border-radius:50px;
-    outline:1px var(--sg-39-20) solid;outline-offset:-1px;
-    animation:rise .45s cubic-bezier(.22,.9,.3,1) both;
-  }
-  @keyframes rise{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
-  @media (prefers-reduced-motion:reduce){.bubble{animation:none}}
-
-  .txt{
-    min-width:0;padding-top:6px;
-    font-size:var(--size);font-weight:700;line-height:1.5;
-    color:var(--sg-59);
-    text-align:right;              /* RTL start edge */
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-  }
-  body.wrapmode .txt{white-space:normal}
-  .txt b{color:var(--sg-39);font-weight:700;font-variant-numeric:tabular-nums}
-  .txt .sep{color:rgba(132,168,155,.55);padding:0 1px}
-
-  .badge{
-    display:inline-flex;align-items:center;justify-content:flex-end;gap:4px;flex:none;
-    padding:6px 16px 6px 20px;               /* t r b l - per the export */
-    background:var(--sg-39-06);
-    border-radius:20px;
-    outline:1px var(--sg-39-20) solid;outline-offset:-1px;
-    color:var(--sg-39);
-    font-size:calc(var(--size) - 2px);font-weight:400;line-height:1.66;
-    white-space:nowrap;
-  }
-  .badge svg{width:16px;height:16px;flex:none;color:#04CA95}
-
-  /* shrink gracefully in short containers */
-  body.compact .bubble{padding:6px 12px 7px;gap:8px;border-radius:30px}
-  body.compact .txt{padding-top:2px}
-  body.compact .badge{padding:4px 11px 4px 13px}
-
-  /* wrapped: take the available width so the sentence can breathe, keep the
-     badge pinned to the start of the line and the text right-aligned */
-  body.wrapmode #wrap{align-items:stretch}
-  body.wrapmode .bubble{
-    border-radius:18px;align-items:flex-start;padding:12px 16px;
-    width:100%;max-width:100%;
-  }
-  body.wrapmode .txt{
-    white-space:normal;text-overflow:clip;overflow:visible;
-    flex:1 1 auto;text-align:right;
-  }
-
-  /* visible signal that the aggregate is computed on partial data */
-  .bubble.truncated{outline-color:rgba(224,98,92,.55)}
-  .bubble.truncated .txt:after{content:" \26A0";color:#E0625C;font-weight:700}
-  #msg{color:rgba(132,168,155,.5);font-size:12.5px}
-  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;
-       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
-       background:rgba(4,18,13,.96);direction:ltr;text-align:left}
-  #dbg h4{margin:0 0 6px;font-size:12px;color:#00C993}
-  #dbg table{border-collapse:collapse;margin:4px 0 10px;width:100%}
-  #dbg td,#dbg th{border:1px solid rgba(0,201,147,.25);padding:2px 6px;text-align:left}
-  #dbg th{color:#00C993;font-weight:600}
-  #dbg .bad{color:#FF6B6B}
-  #dbg .ok{color:#00C993}
-</style>
-</head>
-<body>
-<div id="wrap"><span id="msg">في انتظار البيانات…</span></div>
-
-<script>
-(function () {
-  "use strict";
-
-  /* ---------------- url params ---------------- */
-  var Q = {};
-  location.search.replace(/^\?/, "").split("&").forEach(function (kv) {
-    if (!kv) return;
-    var i = kv.indexOf("=");
-    var k = decodeURIComponent(i < 0 ? kv : kv.slice(0, i));
-    var v = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1).replace(/\+/g, " "));
-    Q[k] = v;
-  });
-
-  var DEFAULT_TEMPLATE =
-    "{1:dc} سائقاً ضمن قائمة الخطر · قيمة مخالفات {2:sum:c} درهم · بمعدل {3/4:cnt:0} مخالفة سنوياً.";
-
-  var TEMPLATE = (Q.t !== undefined && Q.t !== "") ? Q.t : DEFAULT_TEMPLATE;
-  var BADGE    = (Q.badge !== undefined) ? Q.badge : "ملخّص ذكي";
-  var DP       = (Q.dp !== undefined) ? parseInt(Q.dp, 10) : 2;
-  if (isNaN(DP)) DP = 2;
-  var BASE = Q.size ? parseInt(Q.size, 10) : 16;
-  var MINSZ = Q.min ? parseInt(Q.min, 10) : 10;
-  if (isNaN(BASE) || BASE < 6) BASE = 16;
-  if (isNaN(MINSZ) || MINSZ < 6) MINSZ = 10;
-  var SCALE = Q.scale || "ar";
-  if (Q.align === "start") document.body.classList.add("start");
-  // locked-down networks may block Google Fonts; ?font=0 removes the request
-  if (Q.font === "0") { var g = document.getElementById("gfont"); if (g) g.remove(); }
-
-  var wrap = document.getElementById("wrap");
-
-  var UNITS = {
-    ar: [[1e12, "تريليون"], [1e9, "مليار"], [1e6, "مليون"], [1e3, "ألف"]],
-    en: [[1e12, "trillion"], [1e9, "billion"], [1e6, "million"], [1e3, "thousand"]],
-    none: []
-  };
-
-  function num(n, dp) {
-    return n.toLocaleString("en-US", { maximumFractionDigits: dp });
-  }
-
-  /* plain number, thousands separated */
-  function fmt(v, dp) {
-    if (v === null || v === undefined || v === "") return "";
-    var n = Number(v);
-    if (isNaN(n)) return String(v);
-    var whole = Math.abs(n % 1) < 1e-9;
-    return num(n, whole ? 0 : (dp === undefined ? DP : dp));
-  }
-
-  /* auto-scaled: picks the magnitude word from the value itself, so the
-     sentence stays true when a filter changes the order of magnitude */
-  function fmtCompact(v, dp) {
-    if (v === null || v === undefined || v === "") return "";
-    var n = Number(v);
-    if (isNaN(n)) return String(v);
-    var tiers = UNITS[SCALE] || UNITS.ar, a = Math.abs(n);
-    for (var i = 0; i < tiers.length; i++) {
-      if (a >= tiers[i][0]) {
-        var x = n / tiers[i][0];
-        var d = (dp !== undefined) ? dp : (Math.abs(x) >= 100 ? 1 : 2);
-        return num(x, d) + " " + tiers[i][1];
-      }
-    }
-    return num(n, Math.abs(n % 1) < 1e-9 ? 0 : (dp === undefined ? DP : dp));
-  }
-  function esc(s) {
-    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  /* parse one side of a placeholder: "2", "2:sum", "2:sum:c", "4:dc" */
+  function parseRef(str) {
+    var t = String(str).split(":");
+    var ref = { idx: parseInt(t[0], 10) - 1, agg: null, kind: "", dp: undefined };
+    t.slice(1).forEach(function (tok) {
+      if (!tok) return;
+      var base = tok.replace(/\d+$/, "");
+      if (AGGS2[tok])  { ref.agg = tok;  return; }
+      if (AGGS2[base]) { ref.agg = base; return; }
+      var m = tok.match(/^([a-z]?)(\d*)$/);
+      if (m) { if (m[1]) ref.kind = m[1]; if (m[2] !== "") ref.dp = parseInt(m[2], 10); }
     });
+    return ref;
   }
 
-  /* the Figma export used an SF Pro private-use glyph, which only renders on
-     macOS - an inline SVG sparkle is equivalent and portable */
-  var SPARK =
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
-    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-    '<path d="M12 3.4 13.75 9l5.6 1.75L13.75 12.5 12 18.1l-1.75-5.6L4.65 10.75 10.25 9 12 3.4Z"/>' +
-    '<path d="M18.7 3.5v2.5M19.95 4.75h-2.5"/></svg>';
-
-  var ROWS = [];
-  var TRUNCATED = false;   // VA capped the rows it sent -> aggregates unreliable
-
-  /* value from the first row - kept for backwards compatibility */
-  function cell(i) { return ROWS.length ? ROWS[0][i] : undefined; }
-
-  /* aggregate column i across EVERY row VA returned */
-  function aggregate(i, how) {
-    if (!ROWS.length) return undefined;
-    if (how === "cnt") return ROWS.length;
-    if (how === "first") return ROWS[0][i];
-    if (how === "dc") {
-      var seen = Object.create(null), k = 0;
-      for (var r = 0; r < ROWS.length; r++) {
-        var key = String(ROWS[r][i]);
-        if (!(key in seen)) { seen[key] = 1; k++; }
-      }
-      return k;
-    }
-    var acc = null, cnt = 0;
-    for (var j = 0; j < ROWS.length; j++) {
-      var x = Number(ROWS[j][i]);
-      if (isNaN(x)) continue;
-      cnt++;
-      if (acc === null) acc = x;
-      else if (how === "min") acc = Math.min(acc, x);
-      else if (how === "max") acc = Math.max(acc, x);
-      else acc += x;                       // sum / avg
-    }
-    if (acc === null) return undefined;
-    return (how === "avg" && cnt) ? acc / cnt : acc;
+  function valueOf(ref, single) {
+    // a pre-aggregated single row IS the answer; applying :dc or :sum on top
+    // would corrupt it, so aggregates engage only on detail rows
+    return (ref.agg && !single) ? aggregate(ref.idx, ref.agg) : cell(ref.idx);
   }
 
-  function render(values) {
-    // {n}  {n:agg}  {n:agg:fmt}  {n:fmt}  {n/m}  {n/m:fmt}
-    var RE = /\{(\d+)(?:\/(\d+))?((?::[a-z]*\d*)*)\}/g;
-    var AGGS = { sum: 1, dc: 1, cnt: 1, avg: 1, min: 1, max: 1, first: 1 };
+  function render() {
+    // each side of a ratio carries its OWN aggregate, so a row count can be
+    // divided by a distinct count instead of by itself
+    var html = esc(TEMPLATE).replace(/\{([0-9][^}]*)\}/g, function (_, body) {
+      var sides = body.split("/");
+      var L = parseRef(sides[0]);
+      var R = sides.length > 1 ? parseRef(sides[1]) : null;
+      if (isNaN(L.idx) || (R && isNaN(R.idx))) return "";
 
-    var html = esc(TEMPLATE).replace(RE, function (_, n, den, specs) {
-      var parts = (specs || "").split(":").filter(function (x) { return x !== ""; });
-      var agg = null, kind = "", dp;
-      parts.forEach(function (tok) {
-        var name = tok.replace(/\d+$/, "");
-        if (AGGS[tok]) { agg = tok; return; }
-        if (AGGS[name]) { agg = name; return; }
-        // otherwise a format spec: "c", "c1", "0", "2"
-        var m2 = tok.match(/^([a-z]?)(\d*)$/);
-        if (m2) { if (m2[1]) kind = m2[1]; if (m2[2] !== "") dp = parseInt(m2[2], 10); }
-      });
-
-      var v = agg ? aggregate(Number(n) - 1, agg) : cell(Number(n) - 1);
+      var single = ROWS.length === 1;
+      var v = valueOf(L, single);
       if (v === undefined || v === null || v === "") return "";
 
-      if (den !== undefined) {
-        var d = agg ? aggregate(Number(den) - 1, agg) : cell(Number(den) - 1);
-        d = Number(d);
+      if (R) {
+        var d = Number(valueOf(R, single));
         if (!d || isNaN(d)) return "";
         v = Number(v) / d;
       }
-      var out = (kind === "c") ? fmtCompact(v, dp) : fmt(v, dp);
+      var kind = (R && R.kind) || L.kind;
+      var dp   = (R && R.dp !== undefined) ? R.dp : L.dp;
+      var out  = (kind === "c") ? fmtCompact(v, dp) : fmt(v, dp);
       return "<b>" + esc(out) + "</b>";
-    });
-    html = html.replace(/\s·\s/g, ' <span class="sep">·</span> ');
+    }).replace(/\s·\s/g, ' <span class="sep">·</span> ');
 
     wrap.innerHTML =
       '<div class="bubble' + (TRUNCATED ? " truncated" : "") + '"' +
       (TRUNCATED ? ' title="VA delivered only part of the data, so these totals are partial."' : "") + '>' +
-        '<span class="txt">' + html + "</span>" +
         (BADGE ? '<span class="badge">' + esc(BADGE) + SPARK + "</span>" : "") +
+        '<span class="txt">' + html + "</span>" +
       "</div>";
     fit();
   }
-
-  /* ----------------------------------------------------------------------
-     Auto-fit to the DDC frame.
-     1. full size on one line
-     2. prefer WRAPPING at full size over shrinking to unreadable text
-     3. shrink while wrapped if still too tall
-     4. single line shrunk, last resort for very short frames
-     Runs inside requestAnimationFrame so a resize drag does not thrash layout.
-     ---------------------------------------------------------------------- */
-  function setSize(px) {
-    document.documentElement.style.setProperty("--size", px + "px");
-  }
-
-  function fits(b, w, h) {
-    return b.scrollWidth <= w + 0.5 && b.scrollHeight <= h + 0.5;
-  }
-
-  function fit() {
-    var b = wrap.querySelector(".bubble");
-    if (!b) return;
-    var availW = wrap.clientWidth - 12,
-        availH = wrap.clientHeight - 12;
-    if (availW <= 0 || availH <= 0) return;
-
-    // 1. best case: full size, single line
-    document.body.classList.remove("wrapmode");
-    setSize(BASE);
-    if (fits(b, availW, availH)) return;
-
-    // 2. prefer WRAPPING at full size over shrinking to unreadable text
-    document.body.classList.add("wrapmode");
-    setSize(BASE);
-    if (fits(b, availW, availH)) return;
-
-    // 3. still too tall/wide when wrapped: step the type down
-    var size = BASE, guard = 0;
-    while (!fits(b, availW, availH) && size > MINSZ && guard++ < 60) {
-      size -= 0.5;
-      setSize(size);
-    }
-    if (fits(b, availW, availH)) return;
-
-    // 4. last resort for very short frames: single line, shrunk
-    document.body.classList.remove("wrapmode");
-    size = BASE; guard = 0;
-    setSize(size);
-    while (!fits(b, availW, availH) && size > MINSZ && guard++ < 60) {
-      size -= 0.5;
-      setSize(size);
-    }
-  }
-
-  var fitPending = false;
-  function scheduleFit() {
-    if (fitPending) return;
-    fitPending = true;
-    requestAnimationFrame(function () { fitPending = false; fit(); });
-  }
-
-  var DEBUG = Q.debug === "1";
-
-  function debugDump(m) {
-    var d = document.getElementById("dbg");
-    if (!d) { d = document.createElement("div"); d.id = "dbg"; document.body.appendChild(d); }
-    var cols = m.columns || [], rows = m.data || [];
-    var h = "<h4>DDC debug — what SAS Visual Analytics sent</h4>";
-    h += "resultName: <b>" + (m.resultName || "(none)") + "</b><br>";
-    if (m.rowCount !== undefined || m.availableRowCount !== undefined) {
-      var trunc = m.availableRowCount > m.rowCount;
-      h += "rowCount: <b>" + m.rowCount + "</b> of availableRowCount: <b class='" +
-           (trunc ? "bad" : "ok") + "'>" + m.availableRowCount + "</b>" +
-           (trunc ? " <span class='bad'>&larr; TRUNCATED, aggregates will be partial</span>" : "") +
-           "<br>";
-    }
-    h += "columns: <b>" + cols.length + "</b> &nbsp; rows: <b class='" +
-         (rows.length ? "ok" : "bad") + "'>" + rows.length + "</b><br><br>";
-
-    if (!rows.length) {
-      h += "<span class='bad'>The query returned NO ROWS, so every {n} " +
-           "placeholder renders empty.</span><br><br>";
-    }
-    h += "<table><tr><th>#</th><th>label</th><th>type</th><th>usage</th>" +
-         "<th>row&nbsp;1 value</th><th>-&gt;</th></tr>";
-    cols.forEach(function (c, i) {
-      var v = rows.length ? rows[0][i] : "";
-      h += "<tr><td>" + (i + 1) + "</td><td>" + esc(c.label || c.name) + "</td><td>" +
-           esc(c.type || "") + "</td><td>" + esc(c.usage || "") + "</td><td>" +
-           esc(String(v)) + "</td><td>{" + (i + 1) + "}</td></tr>";
-    });
-    h += "</table>";
-    h += "template: <code>" + esc(TEMPLATE) + "</code>";
-    d.innerHTML = h;
-  }
-
-  function onMessage(ev) {
-    var m = ev.data;
-    if (!m || typeof m !== "object" || !m.columns || !m.data) return;
-    ROWS = m.data || [];
-    // VA limits the rows delivered to a DDC. If it had more to give, any
-    // aggregate computed here is a partial figure - say so rather than
-    // quietly publishing a wrong number.
-    TRUNCATED = !!(m.availableRowCount && m.rowCount &&
-                   m.availableRowCount > m.rowCount);
-    if (TRUNCATED) {
-      console.warn("[Smart Summary] VA sent " + m.rowCount + " of " +
-        m.availableRowCount + " rows - aggregates are partial. " +
-        "Pre-aggregate in the data source, or assign fewer categories.");
-    }
-    if (DEBUG) { debugDump(m); return; }
-    render(ROWS[0] || []);
-  }
-  window.addEventListener("message", onMessage, false);
-
-  function applyLayout() {
-    document.body.classList.toggle("compact", document.documentElement.clientHeight < 64);
-    scheduleFit();
-  }
-  if (window.ResizeObserver) new ResizeObserver(applyLayout).observe(document.documentElement);
-  window.addEventListener("resize", applyLayout, false);
-  // webfont swap changes metrics, so refit once Tajawal has loaded
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleFit);
-  applyLayout();
-
-  /* standalone preview - never runs inside VA */
-  if (window.parent === window) {
-    onMessage({ data: {
-      resultName: "preview",
-      columns: [
-        { name: "m1", label: "Dangerous drivers", type: "number", usage: "quantitative" },
-        { name: "m2", label: "Total fines (AED)", type: "number", usage: "quantitative" },
-        { name: "m3", label: "Tickets",           type: "number", usage: "quantitative" },
-        { name: "m4", label: "Years",             type: "number", usage: "quantitative" }
-      ],
-      data: [[143765, 2070000000, 2144, 4]]
-    }});
-  }
-})();
-</script>
-</body>
-</html>
