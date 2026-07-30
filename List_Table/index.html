@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>List Table — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content     List_Table  v1 2026-07-29
+  =======================================================================
+  A paginated detail-row table. Shows each row of the result set AS-IS, with
+  no aggregation, so records with no unique key still render individually.
+  Transparent background, RTL, sized to the container; pager pinned at the
+  bottom.
+
+  DATA ROLES  ("Variables" role, right-to-left = assignment order)
+  ---------------------------------------------------------------
+  Assign the columns you want as table columns, in order. They render right
+  to left (first assigned = rightmost). All should be CATEGORIES so VA returns
+  DETAIL ROWS rather than grouping. For the CID cases table:
+
+    1. Traffic No                 -> plain text (rightmost)
+    2. driver name A              -> bold name
+    3. وجود البلاغات الجنائية       -> red bubble when = بلاغ جنائي
+    4. category                   -> bubble: مقلقة (red) / غير مقلقة (green)
+    5. crime ADSC                 -> التهمة, plain text
+
+  COLUMN RENDERING (?cols=)
+  -------------------------
+  Each column can be styled by TYPE. Default is plain text. Override per column
+  (1-based, | separated) with ?cols=, e.g.
+     ?cols=text|bold|flag:بلاغ جنائي|bubble|text
+  types:
+     text            plain
+     bold            emphasised (for the name)
+     bubble          coloured pill; colour chosen from the value (مقلقة=red,
+                     غير مقلقة=green, خطورة words map to the danger palette)
+     flag:VALUE      red pill only when the cell equals VALUE, else nothing
+     status          amber "قيد المراجعة"-style pill for any value
+
+  HEADERS (?headers=)
+  -------------------
+  By default the VA column labels are used. Override with a |-separated list,
+  right-to-left, e.g. ?headers=رقم الملف|اسم السائق|الحالة|التصنيف|وصف التهمة
+
+  URL PARAMETERS
+  --------------
+    ?rows=9         rows per page (default: as many as fit the height)
+    ?cols=...       per-column render types (see above)
+    ?headers=...    override header labels
+    ?size=13        base font size in px
+    ?select=0       disable click-to-filter on a row
+    ?font=0         skip the Google Fonts request
+    ?debug=1        show what VA sent
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap">
+<style>
+  :root{
+    --mint:#00C993; --mint-2:#2BE5A8;
+    --head:#8FB3A6; --text:#DCEFE8; --name:#F3FAF6; --muted:#7E948C;
+    --line:rgba(255,255,255,.05);
+    --row-alt:rgba(255,255,255,.015);
+    --size:13px;
+    /* bubble palettes */
+    --red-bg:rgba(196,70,60,.16);   --red-line:#C4463C;   --red-tx:#E88178;
+    --grn-bg:rgba(23,150,110,.16);  --grn-line:#1F9D74;   --grn-tx:#43D6A2;
+    --amb-bg:rgba(196,140,30,.15);  --amb-line:#C08A1E;   --amb-tx:#E0B24A;
+    --org-bg:rgba(196,110,30,.15);  --org-line:#C4781E;   --org-tx:#E39A3A;
+    --ar:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;color:var(--text);font-family:var(--ar);
+       overflow:hidden;-webkit-font-smoothing:antialiased}
+  #root{height:100%;width:100%;min-height:0;min-width:0;padding:0;
+        display:flex;flex-direction:column;font-size:var(--size)}
+
+  table{width:100%;border-collapse:collapse;table-layout:fixed}
+  thead th{color:var(--head);font-weight:700;font-size:1em;text-align:center;
+           padding:.7em .6em;white-space:nowrap;border-bottom:1px solid var(--line)}
+  thead th:last-child{text-align:right}          /* name header hugs the start */
+  #body{flex:1 1 auto;min-height:0;overflow:hidden}
+  tbody td{padding:.6em .6em;text-align:center;font-size:1em;color:var(--text);
+           border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;
+           text-overflow:ellipsis}
+  tbody td:last-child{text-align:right;font-weight:800;color:var(--name)}
+  tbody tr{transition:background .12s}
+  tbody tr:nth-child(even){background:var(--row-alt)}
+  tbody tr:hover{background:rgba(0,201,147,.06)}
+  tbody tr.sel{background:rgba(0,201,147,.12)}
+  tbody tr.click{cursor:pointer}
+
+  .pill{display:inline-flex;align-items:center;justify-content:center;
+        padding:.32em 1.1em;border-radius:999px;font-size:.92em;font-weight:700;
+        border:1px solid;white-space:nowrap;line-height:1.4}
+  .pill.red{background:var(--red-bg);border-color:var(--red-line);color:var(--red-tx)}
+  .pill.grn{background:var(--grn-bg);border-color:var(--grn-line);color:var(--grn-tx)}
+  .pill.amb{background:var(--amb-bg);border-color:var(--amb-line);color:var(--amb-tx)}
+  .pill.org{background:var(--org-bg);border-color:var(--org-line);color:var(--org-tx)}
+  td.bold{font-weight:800;color:var(--name)}
+
+  #pager{flex:none;display:flex;align-items:center;justify-content:center;gap:.5em;
+         padding:.7em 0 .3em}
+  #pager button{font-family:inherit;font-size:.95em;font-weight:700;min-width:2.1em;
+        height:2.1em;padding:0 .5em;border-radius:9px;cursor:pointer;
+        background:transparent;border:1px solid rgba(255,255,255,.12);color:var(--muted);
+        transition:background .15s,color .15s,border-color .15s}
+  #pager button:hover{color:var(--text);border-color:var(--mint)}
+  #pager button.on{background:var(--mint);border-color:var(--mint);color:#062B21}
+  #pager button.ell{border:0;pointer-events:none;min-width:1.4em}
+  #pager button.nav{color:var(--head)}
+
+  #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+       color:var(--muted);font-size:12.5px;pointer-events:none}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;z-index:9;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.97);direction:ltr;text-align:left}
+  #dbg h4{margin:8px 0 4px;font-size:12px;color:var(--mint)}
+  #dbg table{border-collapse:collapse;margin:4px 0;width:100%;table-layout:auto}
+  #dbg td,#dbg th{border:1px solid rgba(0,201,147,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:var(--mint);font-weight:600}
+  #dbg .bad{color:#FF6B6B} #dbg .ok{color:var(--mint)}
+</style>
+</head>
+<body>
+<div id="root">
+  <div id="body"><table><thead id="head"></thead><tbody id="rows"></tbody></table></div>
+  <div id="pager"></div>
+</div>
+<div id="msg">في انتظار البيانات…</div>
+
+<script>
+(function(){
+  "use strict";
+  var VERSION = "List_Table v1 2026-07-29";
+  console.log("[" + VERSION + "]");
+
+  var Q = {};
+  location.search.replace(/^\?/,"").split("&").forEach(function(kv){
+    if(!kv) return;
+    var i = kv.indexOf("=");
+    Q[decodeURIComponent(i<0?kv:kv.slice(0,i))] = i<0?"":decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));
+  });
+  if (Q.font === "0"){ var g=document.getElementById("gfont"); if(g) g.remove(); }
+  if (Q.size) document.documentElement.style.setProperty("--size", parseInt(Q.size,10)+"px");
+
+  var PAGESIZE = Q.rows ? parseInt(Q.rows,10) : 0;   // 0 = fit to height
+  var COLSPEC  = Q.cols ? Q.cols.split("|") : null;
+  var HEADERS  = Q.headers ? Q.headers.split("|") : null;
+  var SELECTABLE = Q.select !== "0";
+  var DEBUG    = Q.debug === "1";
+
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+
+  var COLS = [], ROWS = [], RESULT = null, PAGE = 0, SEL = {};
+
+  /* bubble colour inferred from common Arabic status words */
+  function bubbleClass(v){
+    var s = String(v).trim();
+    if (/غير\s*مقلقة|منخفض|سليم|غير\s*مطلوب|غير\s*محجوز/.test(s)) return "grn";
+    if (/مقلقة|عالي|خطير|مطلوب|محجوز|بلاغ/.test(s)) return "red";
+    if (/متوسط/.test(s)) return "amb";
+    if (/خطر/.test(s)) return "org";
+    return "amb";
+  }
+
+  function cellHTML(val, spec){
+    var s = String(val==null?"":val);
+    if (!spec || spec === "text") return esc(s);
+    if (spec === "bold") return '<span class="bold">'+esc(s)+"</span>";
+    if (spec === "bubble"){
+      if (s.trim()==="") return "";
+      return '<span class="pill '+bubbleClass(s)+'">'+esc(s)+"</span>";
+    }
+    if (spec === "status"){
+      if (s.trim()==="") return "";
+      return '<span class="pill amb">'+esc(s)+"</span>";
+    }
+    if (spec.indexOf("flag:")===0){
+      var want = spec.slice(5);
+      return (s.trim()===want) ? '<span class="pill red">'+esc(s)+"</span>" : "";
+    }
+    return esc(s);
+  }
+
+  function build(m){
+    var cols = m.columns || [], data = m.data || [];
+    // keep every assigned column, in order; VA sends detail rows for categories
+    COLS = cols.map(function(c,i){
+      return {
+        idx:i,
+        label: (HEADERS && HEADERS[i]!==undefined) ? HEADERS[i] : (c.label||c.name||("عمود "+(i+1))),
+        spec:  (COLSPEC && COLSPEC[i]) ? COLSPEC[i] : "text"
+      };
+    });
+    ROWS = data.map(function(r,ri){ return {cells:r, rowIndex:ri}; });
+    PAGE = 0;
+    SEL = {};
+    if (m.selections) m.selections.forEach(function(s){ SEL[s.row]=true; });
+  }
+
+  function rowsPerPage(){
+    if (PAGESIZE) return PAGESIZE;
+    var bodyH = document.getElementById("body").clientHeight;
+    var headH = document.getElementById("head").clientHeight || 34;
+    var rowH  = 2.9 * parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--size"));
+    var n = Math.floor((bodyH - headH) / rowH);
+    return Math.max(1, n);
+  }
+
+  function render(){
+    document.getElementById("msg").style.display = ROWS.length ? "none":"flex";
+    if (!ROWS.length){ document.getElementById("head").innerHTML=""; document.getElementById("rows").innerHTML=""; document.getElementById("pager").innerHTML=""; return; }
+
+    document.getElementById("head").innerHTML =
+      "<tr>" + COLS.map(function(c){ return "<th>"+esc(c.label)+"</th>"; }).join("") + "</tr>";
+
+    var per = rowsPerPage();
+    var pages = Math.max(1, Math.ceil(ROWS.length / per));
+    if (PAGE >= pages) PAGE = pages-1;
+    var slice = ROWS.slice(PAGE*per, PAGE*per + per);
+
+    document.getElementById("rows").innerHTML = slice.map(function(row){
+      var tds = COLS.map(function(c){ return "<td class='"+(c.spec==="bold"?"bold":"")+"'>"+cellHTML(row.cells[c.idx], c.spec)+"</td>"; }).join("");
+      return "<tr class='"+(SELECTABLE?"click":"")+(SEL[row.rowIndex]?" sel":"")+"' data-row='"+row.rowIndex+"'>"+tds+"</tr>";
+    }).join("");
+
+    renderPager(pages);
+  }
+
+  function renderPager(pages){
+    var p = document.getElementById("pager");
+    if (pages <= 1){ p.innerHTML=""; return; }
+    var html = "";
+    html += "<button class='nav' data-go='"+Math.max(0,PAGE-1)+"' "+(PAGE===0?"disabled":"")+">‹</button>";
+    // windowed page numbers, matching the mock's ...5 4 3 2 [1] feel (RTL)
+    var wins = [];
+    for (var i=0;i<pages;i++) wins.push(i);
+    var show = [];
+    wins.forEach(function(i){
+      if (i===0 || i===pages-1 || Math.abs(i-PAGE)<=1) show.push(i);
+      else if (show[show.length-1] !== "…") show.push("…");
+    });
+    show.forEach(function(i){
+      if (i==="…"){ html += "<button class='ell'>…</button>"; return; }
+      html += "<button data-go='"+i+"' class='"+(i===PAGE?"on":"")+"'>"+(i+1)+"</button>";
+    });
+    html += "<button class='nav' data-go='"+Math.min(pages-1,PAGE+1)+"' "+(PAGE===pages-1?"disabled":"")+">›</button>";
+    p.innerHTML = html;
+  }
+
+  document.addEventListener("click", function(ev){
+    var b = ev.target.closest("#pager button[data-go]");
+    if (b){ PAGE = parseInt(b.getAttribute("data-go"),10); render(); return; }
+    var tr = ev.target.closest("tr[data-row]");
+    if (tr && SELECTABLE){
+      var ri = parseInt(tr.getAttribute("data-row"),10);
+      var additive = ev.ctrlKey||ev.metaKey||ev.shiftKey;
+      if (!additive){ var only = SEL[ri] && Object.keys(SEL).length===1; SEL={}; if(!only) SEL[ri]=true; }
+      else { if (SEL[ri]) delete SEL[ri]; else SEL[ri]=true; }
+      var sels = Object.keys(SEL).map(function(k){ return {row:parseInt(k,10)}; });
+      try { window.parent.postMessage({resultName:RESULT, selections:sels}, "*"); } catch(e){}
+      render();
+    }
+  });
+
+  function dump(m){
+    var d = document.getElementById("dbg");
+    if(!d){ d=document.createElement("div"); d.id="dbg"; document.body.appendChild(d); }
+    var cols=m.columns||[], data=m.data||[];
+    var h = "<h4>List_Table debug</h4>version: <b class='ok'>"+VERSION+"</b><br>";
+    h += "rows: <b>"+data.length+"</b>";
+    if (m.availableRowCount!==undefined && m.availableRowCount>m.rowCount)
+      h += " <span class='bad'>of "+m.availableRowCount+" - TRUNCATED, later pages missing</span>";
+    h += "<br>rows/page at this size: <b>"+rowsPerPage()+"</b><br><br>";
+    h += "<table><tr><th>#</th><th>column</th><th>usage</th><th>render</th><th>row1</th></tr>";
+    cols.forEach(function(c,i){
+      var spec = (COLSPEC&&COLSPEC[i])?COLSPEC[i]:"text";
+      h += "<tr><td>"+(i+1)+"</td><td>"+esc(c.label||c.name)+"</td><td>"+esc(c.usage||"")+
+           "</td><td>"+esc(spec)+"</td><td>"+esc(String(data.length?data[0][i]:""))+"</td></tr>";
+    });
+    h += "</table>";
+    d.innerHTML = h;
+  }
+
+  function onMessage(ev){
+    var m = ev.data;
+    if (!m || typeof m!=="object" || !m.columns || !m.data) return;
+    RESULT = m.resultName || RESULT;
+    if (DEBUG){ build(m); dump(m); return; }
+    build(m); render();
+  }
+  window.addEventListener("message", onMessage, false);
+
+  var pend=false;
+  function onResize(){ if(pend)return; pend=true;
+    requestAnimationFrame(function(){ pend=false; if(ROWS.length) render(); }); }
+  if (window.ResizeObserver) new ResizeObserver(onResize).observe(document.documentElement);
+  window.addEventListener("resize", onResize, false);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(function(){ if(ROWS.length) render(); });
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window){
+    COLSPEC = ["text","bold","flag:بلاغ جنائي","bubble","text"];
+    HEADERS = ["رقم الملف","اسم السائق","الحالة","التصنيف","وصف التهمة"];
+    var names=["سالم ر.","راجيش ك.","عمران م.","كريم ه.","جون د.","فهد س.","أنور ب.","ماهر ت.","دياك ن."];
+    var nats=["الإمارات","الهند","باكستان","مصر","الفلبين","بنغلاديش","الأردن","سوريا","الإمارات"];
+    var cats=["مقلقة","مقلقة","مقلقة","مقلقة","مقلقة","غير مقلقة","مقلقة","غير مقلقة","مقلقة"];
+    var thumas=["القيادة بسرعة جنونية","السب والقذف","مخالفة الأنظمة الجمركية","انتحال صفة",
+                "الاعتداء بالضرب","مخالفة قيود الإقامة","خيانة الأمانة","القيادة بسرعة جنونية","السب والقذف"];
+    var data=[];
+    for (var i=0;i<27;i++){
+      var j=i%9;
+      data.push([ 500000+i*137, names[j], (i%3?"بلاغ جنائي":"بدون البلاغات الجنائية"), cats[j], thumas[j] ]);
+    }
+    onMessage({ data:{
+      resultName:"preview",
+      columns:[
+        {name:"c1",label:"رقم الملف المروري",type:"string",usage:"categorical"},
+        {name:"c2",label:"اسم السائق",       type:"string",usage:"categorical"},
+        {name:"c3",label:"الحالة",           type:"string",usage:"categorical"},
+        {name:"c4",label:"التصنيف",          type:"string",usage:"categorical"},
+        {name:"c5",label:"وصف التهمة",        type:"string",usage:"categorical"}
+      ],
+      data:data
+    }});
+  }
+})();
+</script>
+</body>
+</html>
