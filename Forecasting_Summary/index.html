@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>الذكاء الاصطناعي والتنبؤ — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content        VERSION v1 2026-07-29
+  =======================================================================
+  Narrative + forecast card. Fits its own trend model to the yearly series
+  VA supplies, projects forward, and draws the prediction interval.
+
+  DATA ROLES  ("Variables" role, in this order)
+  ---------------------------------------------
+    1. Year          CATEGORY  required   created_year / TICKET_DATE.Year
+    2. Value         MEASURE   required   the series to forecast
+                                          e.g. Distinct(ByGroup, Traffic No)
+    3. Danger cat    CATEGORY  optional   DANGER_CATEGORY               -> {pct}
+    4. Fines         MEASURE   optional   Sum of TOTAL_FINE             -> {fines}
+    5. Tickets       MEASURE   optional   TICKET_NO with aggregation COUNT
+                                          (VA defaults numeric items to SUM -
+                                           summing TICKET_NO gives billions)
+
+  HOW {pct} IS COMPUTED - read this before building a calculated item
+  -------------------------------------------------------------------
+  Assign DANGER_CATEGORY as a plain CATEGORY. VA then returns one row per
+  (year x category) with the distinct driver count in each, and the share is
+
+      sum(value where category >= 3)  /  sum(value over all categories)
+
+  Each driver has exactly one danger category, so both sides count drivers
+  once. No calculated item, no aggregated measure.
+
+  DO NOT use a per-ticket flag summed up. A calculated item returning 1 when
+  DANGER_CATEGORY >= 3, aggregated with SUM, counts TICKETS, not drivers -
+  and dangerous drivers collect more tickets each, so the share is badly
+  overstated. On the sample data that approach reports 81-86% where the true
+  share is 52-55%.
+
+  If you would rather supply the count yourself, assign it as a MEASURE in
+  position 3 - but it must be a DISTINCT COUNT OF DRIVERS, not a flag sum.
+
+  ROLE ORDER depends on whether a danger category is assigned:
+     with    a category role 3 -> measures are: value, fines, tickets
+     without a category role 3 -> measures are: value, high-risk, fines, tickets
+
+  THE MODEL
+  ---------
+  Ordinary least squares linear trend, with a proper 95% PREDICTION interval:
+
+      SE = s * sqrt( 1 + 1/n + (x - x̄)² / Σ(x - x̄)² )
+      s  = sqrt( SSE / (n - 2) )
+      band = ŷ ± t(α/2, n-2) * SE
+
+  This is NOT the same engine as VA's forecast object (which selects among
+  ARIMA / exponential smoothing models). It reproduces a linear-trend forecast
+  with an honest interval - visually and directionally equivalent, simpler
+  underneath. Say so if anyone asks.
+
+  THE PARTIAL-YEAR TRAP  (?dropLast, default ON)
+  ----------------------------------------------
+  The current year is always incomplete, so including it drags the trend down
+  and the effect is severe. On the sample data:
+
+      including the partial year : slope -28.6/yr, 2031 = 161, interval
+                                   lower bound goes NEGATIVE
+      excluding it               : slope  -8.8/yr, 2031 = 319
+
+  The last year is therefore dropped by default. Pass ?dropLast=0 to keep it.
+
+  NARRATIVE TOKENS (use in ?t=)
+  -----------------------------
+    {now}     TOTAL in the dataset       {fc}      forecast at the target year
+    {latest}  value in the last fitted year (rarely wanted)
+    {fcYear}  target year                {conf}    confidence level, e.g. 95
+    {pct}     high-risk share            {fines}   fines, auto-scaled
+    {tickets} tickets, auto-scaled       {top}     top offence text (?top=)
+    {first}   first actual year          {last}    last actual year
+    {slope}   change per year
+
+  URL PARAMETERS
+  --------------
+    ?to=2031        forecast target year (default: last actual + 5)
+    ?conf=95        confidence level: 80 | 90 | 95 | 99
+    ?dropLast=0     keep the partial final year
+    ?hiFrom=3       lowest danger category counted as high risk (default 3)
+    ?cumulative=1   treat the series as a RUNNING TOTAL. Use this when role 1
+                    is a creation year: each year adds new drivers to the
+                    register, so the register SIZE is the cumulative sum.
+                    Without it the chart shows drivers ADDED per year.
+    ?top=<text>     most frequent offence, fills {top}. Supply it here rather
+                    than as a data role: adding OFFENCE_DESCRIPTION as a
+                    category explodes the query to one row per
+                    year x category x offence, and a driver active in three
+                    offence types would then be counted three times.
+
+  EMPTY TOKENS
+  ------------
+  If a token has no data the whole clause containing it is dropped, so the
+  sentence never renders with dangling text like "وأكثرها تكراراً ." 
+    ?top=<text>     most frequent offence, for the {top} token
+    ?title=<text>   card title
+    ?badge=<text>   badge label (default "AI · NARRATIVE")
+    ?caption=<text> chart caption
+    ?t=<template>   narrative template, URL-encoded
+    ?narr=13        narrative font size in px (default 13, matches the page)
+    ?font=0         skip the Google Fonts request
+    ?debug=1        show what VA sent plus the fitted model
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&family=Rajdhani:wght@500;600&display=swap">
+<style>
+  :root{
+    --mint:#18A3A7; --mint-2:#42B4B7; --mint-dim:#0E5F61;
+    --muted:#84A89B; --light:#CFEEE2; --white:#EAF7F1;
+    --line:rgba(0,201,147,.16);
+    --narr:13px;
+    --ar:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+    --lat:"Rajdhani","Segoe UI",Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;color:var(--light);font-family:var(--ar);
+       overflow:hidden;-webkit-font-smoothing:antialiased}
+  #card{height:100%;width:100%;min-height:0;min-width:0;
+        display:flex;flex-direction:column;gap:10px;padding:14px 18px 10px}
+
+  .hd{display:flex;align-items:center;gap:12px;flex:none}
+  .hd .bar{width:3px;height:20px;border-radius:2px;background:var(--mint);
+           box-shadow:0 0 10px var(--mint);flex:none}
+  .hd h1{font-size:15px;font-weight:700;margin:0;color:var(--white);white-space:nowrap}
+  .badge{display:inline-flex;align-items:center;gap:7px;flex:none;
+         padding:3px 12px;border-radius:999px;
+         border:1px solid rgba(66,180,183,.45);color:var(--mint-2);
+         font-family:var(--lat);font-size:11px;font-weight:600;
+         letter-spacing:.14em;text-transform:uppercase;white-space:nowrap;direction:ltr}
+  .badge svg{width:13px;height:13px}
+  .conf{margin-inline-start:auto;font-size:11px;color:var(--muted);white-space:nowrap}
+
+  .narr{font-size:var(--narr);line-height:1.95;color:var(--light);flex:none;
+        text-align:right;overflow:hidden}
+  .narr b{color:var(--mint);font-weight:700;font-variant-numeric:tabular-nums}
+  .narr .em{color:var(--mint-2);font-weight:700}
+
+  .sep{height:1px;background:var(--line);flex:none;margin:2px 0 0}
+  .cap{font-size:11.5px;color:var(--muted);flex:none;text-align:right}
+  .chartbox{flex:1 1 auto;min-height:0;min-width:0;position:relative;direction:ltr}
+  svg{width:100%;height:100%;display:block}
+
+  #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+       color:var(--muted);font-size:13px;text-align:center;padding:20px}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;z-index:9;
+       font:11.5px/1.55 ui-monospace,Consolas,monospace;color:var(--light);
+       background:rgba(4,18,13,.97);direction:ltr;text-align:left}
+  #dbg h4{margin:0 0 6px;font-size:12px;color:var(--mint)}
+  #dbg table{border-collapse:collapse;margin:4px 0 10px;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(0,201,147,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:var(--mint);font-weight:600}
+  #dbg .bad{color:#FF6B6B} #dbg .ok{color:var(--mint)}
+
+  body.compact .narr{font-size:calc(var(--narr) - 1px);line-height:1.8}
+  body.compact .hd h1{font-size:13.5px}
+  body.compact #card{padding:10px 12px 8px;gap:7px}
+</style>
+</head>
+<body>
+<div id="card">
+  <div class="hd">
+    <span class="bar"></span>
+    <h1 id="title">الذكاء الاصطناعي والتنبؤ</h1>
+    <span class="badge" id="badge"></span>
+    <span class="conf" id="conf"></span>
+  </div>
+  <div class="narr" id="narr"></div>
+  <div class="sep"></div>
+  <div class="cap" id="cap"></div>
+  <div class="chartbox"><svg id="chart" preserveAspectRatio="none"></svg></div>
+</div>
+<div id="msg">في انتظار البيانات من SAS Visual Analytics…</div>
+
+<script>
+(function () {
+  "use strict";
+  var VERSION = "AI_Forecast v1 2026-07-29";
+  console.log("[" + VERSION + "]");
+
+  /* ------------------------------ params ------------------------------ */
+  var Q = {};
+  location.search.replace(/^\?/, "").split("&").forEach(function (kv) {
+    if (!kv) return;
+    var i = kv.indexOf("=");
+    var k = decodeURIComponent(i < 0 ? kv : kv.slice(0, i));
+    var v = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1).replace(/\+/g, " "));
+    Q[k] = v;
+  });
+  if (Q.font === "0") { var g = document.getElementById("gfont"); if (g) g.remove(); }
+
+  var TARGET    = Q.to ? parseInt(Q.to, 10) : null;
+  var CONF      = Q.conf ? parseInt(Q.conf, 10) : 95;
+  var DROP_LAST = Q.dropLast !== "0";           // partial year excluded by default
+  var TOPOFF    = Q.top || "";
+  var HI_FROM   = Q.hiFrom ? parseFloat(Q.hiFrom) : 3;
+  var CUMULATIVE = Q.cumulative === "1";
+  if (Q.narr) document.documentElement.style.setProperty("--narr", parseInt(Q.narr,10) + "px");
+  var DEBUG     = Q.debug === "1";
+
+  var DEFAULT_T =
+    "يوجد {now} سائقاً ضمن قائمة الخطر، يمثّل عالو الخطورة {pct} منهم. " +
+    "بلغت قيمة المخالفات {fines} درهم عبر {tickets} مخالفة، وأكثرها تكراراً {top}. " +
+    "يشير التنبؤ إلى بلوغ العدد نحو {fc} بحلول {fcYear}.";
+  var TEMPLATE = (Q.t !== undefined && Q.t !== "") ? Q.t : DEFAULT_T;
+
+  document.getElementById("title").textContent = Q.title || "الذكاء الاصطناعي والتنبؤ";
+
+  var SPARK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+    'stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.4 13.75 9l5.6 1.75L13.75 12.5' +
+    ' 12 18.1l-1.75-5.6L4.65 10.75 10.25 9 12 3.4Z"/></svg>';
+  document.getElementById("badge").innerHTML =
+    (Q.badge !== undefined ? esc(Q.badge) : "AI &middot; Narrative") + SPARK;
+
+  /* ---------------------------- formatting ---------------------------- */
+  var TIERS = [[1e12,"تريليون"],[1e9,"مليار"],[1e6,"مليون"],[1e3,"ألف"]];
+  function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
+  function num(n,dp){return Number(n).toLocaleString("en-US",{maximumFractionDigits:dp});}
+  function fmt(v){ if(v==null||v==="")return""; var n=Number(v);
+    return isNaN(n)?String(v):num(n, Math.abs(n%1)<1e-9?0:2); }
+  function compact(v){
+    if(v==null||v==="")return""; var n=Number(v); if(isNaN(n))return String(v);
+    var a=Math.abs(n);
+    for(var i=0;i<TIERS.length;i++){ if(a>=TIERS[i][0]){
+      var x=n/TIERS[i][0]; return num(x, Math.abs(x)>=100?1:2)+" "+TIERS[i][1]; } }
+    return num(n,0);
+  }
+  function axisNum(n){
+    var a=Math.abs(n);
+    if(a>=1e9) return num(n/1e9,1)+"b";
+    if(a>=1e6) return num(n/1e6,1)+"m";
+    if(a>=1e3) return num(n/1e3,0)+"k";
+    return num(n,0);
+  }
+
+  /* --------------------------- the trend model ------------------------ */
+  // two-tailed t critical values by degrees of freedom
+  var TT = {
+    80:{1:3.078,2:1.886,3:1.638,4:1.533,5:1.476,6:1.440,7:1.415,8:1.397,9:1.383,10:1.372,inf:1.282},
+    90:{1:6.314,2:2.920,3:2.353,4:2.132,5:2.015,6:1.943,7:1.895,8:1.860,9:1.833,10:1.812,inf:1.645},
+    95:{1:12.706,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,7:2.365,8:2.306,9:2.262,10:2.228,inf:1.960},
+    99:{1:63.657,2:9.925,3:5.841,4:4.604,5:4.032,6:3.707,7:3.499,8:3.355,9:3.250,10:3.169,inf:2.576}
+  };
+  function tcrit(conf, df){
+    var row = TT[conf] || TT[95];
+    if (df <= 0) return row[1];
+    return row[df] !== undefined ? row[df] : row.inf;
+  }
+
+  function fitTrend(xs, ys, conf){
+    var n = xs.length;
+    if (n < 2) return null;
+    var mx = xs.reduce(function(a,b){return a+b;},0)/n;
+    var my = ys.reduce(function(a,b){return a+b;},0)/n;
+    var sxx = 0, sxy = 0;
+    for (var i=0;i<n;i++){ sxx += (xs[i]-mx)*(xs[i]-mx); sxy += (xs[i]-mx)*(ys[i]-my); }
+    if (!sxx) return null;
+    var b = sxy/sxx, a = my - b*mx;
+    var sse = 0;
+    for (i=0;i<n;i++){ var e = ys[i]-(a+b*xs[i]); sse += e*e; }
+    var s = n > 2 ? Math.sqrt(sse/(n-2)) : 0;
+    var t = tcrit(conf, n-2);
+    return {
+      a:a, b:b, s:s, n:n, mx:mx, sxx:sxx, t:t,
+      predict: function(x){ return a + b*x; },
+      // PREDICTION interval - wider than a confidence interval, correct for
+      // "where will next year's value land", which is what is being claimed
+      band: function(x){
+        var se = s * Math.sqrt(1 + 1/n + (x-mx)*(x-mx)/sxx);
+        return t * se;
+      }
+    };
+  }
+
+  /* ------------------------------- state ------------------------------ */
+  var STATE = null;
+
+  function pickCols(columns){
+    var cats = [], meas = [];
+    columns.forEach(function(c,i){
+      var u = String(c.usage||"").toLowerCase(), t = String(c.type||"").toLowerCase();
+      if (u === "quantitative" || (!u && t === "number")) meas.push(i);
+      else cats.push(i);
+    });
+    if (!cats.length) cats.push(0);
+    var p = { year: cats[0], dcat: cats.length > 1 ? cats[1] : undefined };
+    // when a danger CATEGORY is present the share is derived from grouping,
+    // so measure 2 is no longer the high-risk count
+    if (p.dcat !== undefined) {
+      p.val = meas[0]; p.hi = undefined; p.fines = meas[1]; p.tickets = meas[2];
+    } else {
+      p.val = meas[0]; p.hi = meas[1]; p.fines = meas[2]; p.tickets = meas[3];
+    }
+    return p;
+  }
+
+  function build(m){
+    var cols = m.columns || [], rows = m.data || [];
+    var p = pickCols(cols);
+
+    // one row per year -> collapse defensively in case VA sends finer grain
+    var byYear = {};
+    rows.forEach(function(r){
+      var y = parseInt(String(r[p.year]).replace(/[^0-9]/g,"").slice(0,4), 10);
+      if (isNaN(y)) return;
+      if (!byYear[y]) byYear[y] = { y:y, val:0, hi:0, fines:0, tickets:0 };
+      var v = Number(r[p.val]) || 0;
+      byYear[y].val += v;
+      if (p.dcat !== undefined) {
+        // grouped by danger category: each driver appears in exactly one
+        // category, so summing the high categories counts drivers once
+        var dc = parseFloat(String(r[p.dcat]).replace(/[^0-9.\-]/g, ""));
+        if (!isNaN(dc) && dc >= HI_FROM) byYear[y].hi += v;
+      } else if (p.hi !== undefined) {
+        byYear[y].hi += Number(r[p.hi]) || 0;
+      }
+      if (p.fines   !== undefined) byYear[y].fines   += Number(r[p.fines])   || 0;
+      if (p.tickets !== undefined) byYear[y].tickets += Number(r[p.tickets]) || 0;
+    });
+    var years = Object.keys(byYear).map(Number).sort(function(a,b){return a-b;});
+    if (!years.length) return null;
+
+    var series = years.map(function(y){ return byYear[y]; });
+    var raw = series.map(function(d){ return {y:d.y,val:d.val,hi:d.hi,fines:d.fines,tickets:d.tickets}; });
+
+    // A creation year records when each driver JOINED the register, so the
+    // register's size at year Y is the running total, not that year's intake.
+    if (CUMULATIVE) {
+      var runVal = 0, runHi = 0;
+      series = series.map(function(d){
+        runVal += d.val; runHi += d.hi;
+        return { y:d.y, val:runVal, hi:runHi, fines:d.fines, tickets:d.tickets };
+      });
+    }
+    var usable = series.slice();
+    var dropped = null;
+    // the final year is normally still running, which badly skews the slope
+    if (DROP_LAST && usable.length > 2) dropped = usable.pop();
+
+    var xs = usable.map(function(d){ return d.y; });
+    var ys = usable.map(function(d){ return d.val; });
+    var model = fitTrend(xs, ys, CONF);
+
+    var lastYear = xs[xs.length-1];
+    var target = TARGET || (lastYear + 5);
+    if (target <= lastYear) target = lastYear + 1;
+
+    var fc = [];
+    if (model) {
+      for (var y = lastYear + 1; y <= target; y++) {
+        var pred = model.predict(y), half = model.band(y);
+        fc.push({ y:y, val:pred, lo:Math.max(0, pred-half), hi:pred+half });
+      }
+    }
+
+    // Whole-dataset totals. Every narrative figure except the forecast
+    // summarises WHAT IS IN THE DATA NOW, honouring report filters - not the
+    // most recent year. Summing across cells is exact here because a driver
+    // belongs to exactly one (creation year x danger category) cell.
+    // NB when CUMULATIVE is on, series values are already running totals, so
+    // totals are read from the raw per-year figures instead.
+    var base = CUMULATIVE ? raw : series;
+    var totals = base.reduce(function(acc,d){
+      acc.fines += d.fines; acc.tickets += d.tickets;
+      acc.hi += d.hi; acc.val += d.val; return acc;
+    }, {fines:0,tickets:0,hi:0,val:0});
+
+    return {
+      series:series, usable:usable, dropped:dropped, model:model,
+      fc:fc, target:target, lastYear:lastYear, totals:totals,
+      nowVal: usable[usable.length-1].val,   // series endpoint, for the chart
+      nowHi:  usable[usable.length-1].hi,
+      allDrivers: totals.val,                // whole dataset, for the narrative
+      allHi:      totals.hi,
+      hasHi: (p.hi !== undefined || p.dcat !== undefined),
+      hasFines: p.fines !== undefined,
+      hasTickets: p.tickets !== undefined
+    };
+  }
+
+  /* ----------------------------- narrative ---------------------------- */
+  var GAP = "\u0000";   // marks a token that had no data
+
+  function narrative(S){
+    var fcVal = S.fc.length ? S.fc[S.fc.length-1].val : null;
+    // share across the WHOLE filtered dataset, not the latest year
+    var pct = null;
+    if (S.hasHi && S.allDrivers) pct = (S.allHi / S.allDrivers) * 100;
+
+    var tok = {
+      now:     "<b>" + fmt(S.allDrivers) + "</b>",
+      latest:  "<b>" + fmt(S.nowVal) + "</b>",
+      fc:      fcVal == null ? GAP : "<b>" + fmt(Math.round(fcVal/100)*100) + "</b>",
+      fcYear:  String(S.target),
+      conf:    String(CONF),
+      pct:     pct == null ? GAP : '<span class="em">' + num(pct,1) + "%</span>",
+      fines:   S.hasFines   ? "<b>" + compact(S.totals.fines)   + "</b>" : GAP,
+      tickets: S.hasTickets ? "<b>" + compact(S.totals.tickets) + "</b>" : GAP,
+      top:     TOPOFF ? '<span class="em">' + esc(TOPOFF) + "</span>" : GAP,
+      first:   String(S.series[0].y),
+      last:    String(S.lastYear),
+      slope:   S.model ? "<b>" + num(S.model.b,0) + "</b>" : GAP
+    };
+
+    var filled = esc(TEMPLATE).replace(/\{(\w+)\}/g, function(_, k){
+      return tok[k] !== undefined ? tok[k] : GAP;
+    });
+
+    // Drop any CLAUSE that still contains an unfilled token, so the sentence
+    // never reads "وأكثرها تكراراً ." with nothing after it. Clauses are split
+    // on the Arabic comma and the full stop, and the delimiter goes with the
+    // clause it follows.
+    var parts = filled.split(/([،.])/);
+    var out = [], i;
+    for (i = 0; i < parts.length; i += 2) {
+      var body = parts[i], delim = parts[i+1] || "";
+      if (body.indexOf(GAP) !== -1) continue;      // clause had a hole - drop it
+      if (!body.replace(/\s|<[^>]*>/g, "")) continue;
+      out.push(body + delim);
+    }
+    var txt = out.join("").replace(/\s{2,}/g, " ").trim();
+    // tidy a trailing comma left behind when the final clause was removed
+    txt = txt.replace(/،\s*$/, ".").replace(/\.\s*\.$/, ".");
+    if (txt && !/[.؟!]\s*$/.test(txt)) txt += ".";
+    return txt;
+  }
+
+  /* ------------------------------- chart ------------------------------ */
+  var NS = "http://www.w3.org/2000/svg";
+  function E(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
+  function T(p,x,y,s,f,anc){var t=E("text",{x:x,y:y,"font-size":s,fill:f,"font-family":"var(--lat)"});
+    if(anc)t.setAttribute("text-anchor",anc);p.appendChild(t);return t;}
+
+  function drawChart(S){
+    var box = document.querySelector(".chartbox");
+    var W = box.clientWidth, H = box.clientHeight;
+    if (W < 40 || H < 40) return;
+    var svg = document.getElementById("chart");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.innerHTML = "";
+
+    var padL = 46, padR = 12, padT = 10, padB = 24;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+    if (plotW <= 0 || plotH <= 0) return;
+
+    var all = S.series.map(function(d){return {y:d.y, v:d.val};});
+    S.fc.forEach(function(d){ all.push({y:d.y, v:d.hi}); all.push({y:d.y, v:d.lo}); });
+    var xMin = all[0].y, xMax = all[all.length-1].y;
+    S.fc.forEach(function(d){ if(d.y > xMax) xMax = d.y; });
+    var vMin = Math.min.apply(null, all.map(function(d){return d.v;}));
+    var vMax = Math.max.apply(null, all.map(function(d){return d.v;}));
+    var pad = (vMax - vMin) * 0.15 || Math.max(1, vMax*0.1);
+    vMin = Math.max(0, vMin - pad); vMax = vMax + pad;
+
+    function X(y){ return padL + (y - xMin)/Math.max(1,(xMax-xMin)) * plotW; }
+    function Y(v){ return padT + plotH - (v - vMin)/Math.max(1e-9,(vMax-vMin)) * plotH; }
+
+    // gridlines + y labels
+    var steps = 4;
+    for (var i=0;i<=steps;i++){
+      var v = vMin + (vMax-vMin)*i/steps, y = Y(v);
+      svg.appendChild(E("line",{x1:padL,y1:y,x2:W-padR,y2:y,
+        stroke:"rgba(0,201,147,.10)","stroke-width":1}));
+      T(svg,padL-8,y+3.5,10,"var(--muted)","end").textContent = axisNum(v);
+    }
+    // x labels - thin them out if the frame is narrow
+    var span = xMax - xMin, every = plotW/Math.max(1,span) < 34 ? 2 : 1;
+    for (var yy=xMin; yy<=xMax; yy++){
+      if ((yy - xMin) % every) continue;
+      T(svg,X(yy),H-8,10,"var(--muted)","middle").textContent = yy;
+    }
+
+    // Where the forecast begins. Nudged a few pixels along the first segment
+    // so there is a visible break between observed and projected - the join
+    // should not read as one continuous measured line.
+    var joinX = X(S.lastYear), joinY = Y(S.nowVal);
+    if (S.fc.length){
+      var vx = X(S.fc[0].y) - joinX, vy = Y(S.fc[0].val) - joinY;
+      var vlen = Math.sqrt(vx*vx + vy*vy) || 1;
+      var gap = Math.min(9, vlen * 0.32);
+      joinX += vx / vlen * gap;
+      joinY += vy / vlen * gap;
+    }
+
+    // prediction interval band
+    if (S.fc.length){
+      var d = "M" + joinX + " " + joinY;
+      S.fc.forEach(function(p){ d += "L" + X(p.y) + " " + Y(p.hi); });
+      for (var k=S.fc.length-1;k>=0;k--){ d += "L" + X(S.fc[k].y) + " " + Y(S.fc[k].lo); }
+      d += "Z";
+      svg.appendChild(E("path",{d:d,fill:"var(--mint)","fill-opacity":.16}));
+    }
+
+    // actual line - solid, with markers
+    var da = "";
+    S.usable.forEach(function(p,i){ da += (i?"L":"M") + X(p.y) + " " + Y(p.val); });
+    svg.appendChild(E("path",{d:da,fill:"none",stroke:"var(--mint)","stroke-width":2.4,
+      "stroke-linejoin":"round","stroke-linecap":"round"}));
+
+    // the excluded partial year, shown faintly so it is not simply hidden
+    if (S.dropped){
+      svg.appendChild(E("line",{x1:X(S.lastYear),y1:Y(S.nowVal),
+        x2:X(S.dropped.y),y2:Y(S.dropped.val),
+        stroke:"var(--muted)","stroke-width":1.4,"stroke-dasharray":"2 3","stroke-opacity":.55}));
+      svg.appendChild(E("circle",{cx:X(S.dropped.y),cy:Y(S.dropped.val),r:3,
+        fill:"none",stroke:"var(--muted)","stroke-width":1.4,"stroke-opacity":.7}));
+    }
+
+    // forecast line - dashed, starting after the gap
+    if (S.fc.length){
+      var df = "M" + joinX + " " + joinY;
+      S.fc.forEach(function(p){ df += "L" + X(p.y) + " " + Y(p.val); });
+      svg.appendChild(E("path",{d:df,fill:"none",stroke:"var(--mint)","stroke-width":2.2,
+        "stroke-dasharray":"7 5","stroke-linecap":"round"}));
+      var lastFc = S.fc[S.fc.length-1];
+      svg.appendChild(E("circle",{cx:X(lastFc.y),cy:Y(lastFc.val),r:4,fill:"var(--mint)"}));
+    }
+
+    S.usable.forEach(function(p){
+      svg.appendChild(E("circle",{cx:X(p.y),cy:Y(p.val),r:3.6,
+        fill:"#07231C",stroke:"var(--mint)","stroke-width":2}));
+    });
+  }
+
+  /* ------------------------------ render ------------------------------ */
+  function paint(){
+    if (!STATE) return;
+    document.getElementById("msg").style.display = "none";
+    document.getElementById("narr").innerHTML = narrative(STATE);
+    document.getElementById("conf").textContent = "ثقة " + CONF + "%";
+    document.getElementById("cap").textContent = Q.caption !== undefined ? Q.caption :
+      ("التنبؤ (" + STATE.series[0].y + "\u2013" + STATE.target + ")");
+    drawChart(STATE);
+  }
+
+  function debugDump(m){
+    var d = document.getElementById("dbg");
+    if (!d){ d = document.createElement("div"); d.id="dbg"; document.body.appendChild(d); }
+    var cols = m.columns||[], rows = m.data||[];
+    var h = "<h4>AI Forecast debug</h4>version: <b class='ok'>"+VERSION+"</b><br>";
+    h += "rows: <b>"+rows.length+"</b>";
+    if (m.availableRowCount !== undefined)
+      h += " of <b>"+m.availableRowCount+"</b>"+(m.availableRowCount>m.rowCount?" <span class='bad'>TRUNCATED</span>":"");
+    h += "<br><br><table><tr><th>#</th><th>label</th><th>usage</th><th>row1</th></tr>";
+    cols.forEach(function(c,i){
+      h += "<tr><td>"+(i+1)+"</td><td>"+esc(c.label||c.name)+"</td><td>"+esc(c.usage||"")+
+           "</td><td>"+esc(String(rows.length?rows[0][i]:""))+"</td></tr>";
+    });
+    h += "</table>";
+    if (STATE){
+      h += "<h4>computed totals - sanity check these</h4>";
+      h += "<table><tr><th>token</th><th>value</th><th>note</th></tr>";
+      h += "<tr><td>{tickets}</td><td>" + fmt(STATE.totals.tickets) +
+           "</td><td class='" + (STATE.totals.tickets > STATE.totals.val*1000 ? "bad" : "ok") + "'>" +
+           (STATE.totals.tickets > STATE.totals.val*1000
+             ? "implausibly large - role 5 is probably aggregating TICKET_NO as SUM. Set it to COUNT."
+             : "plausible") + "</td></tr>";
+      h += "<tr><td>{fines}</td><td>" + fmt(STATE.totals.fines) + "</td><td></td></tr>";
+      h += "<tr><td>cumulative</td><td>" + (CUMULATIVE ? "on" : "off") + "</td><td>" +
+           (CUMULATIVE ? "series is a running total" : "series is per-year intake") + "</td></tr>";
+      h += "</table>";
+      h += "<h4>fitted model</h4><table><tr><th>year</th><th>value</th><th>use</th></tr>";
+      STATE.series.forEach(function(p){
+        var used = !(STATE.dropped && p.y===STATE.dropped.y);
+        h += "<tr><td>"+p.y+"</td><td>"+fmt(p.val)+"</td><td class='"+(used?"ok":"bad")+"'>"+
+             (used?"fitted":"dropped (partial year)")+"</td></tr>";
+      });
+      h += "</table>";
+      if (STATE.model){
+        h += "slope: <b>"+num(STATE.model.b,1)+"</b> per year &nbsp; n=<b>"+STATE.model.n+
+             "</b> &nbsp; t("+CONF+"%,df="+(STATE.model.n-2)+")=<b>"+STATE.model.t+"</b><br>";
+        h += "<table><tr><th>year</th><th>forecast</th><th>lower</th><th>upper</th></tr>";
+        STATE.fc.forEach(function(p){
+          h += "<tr><td>"+p.y+"</td><td>"+fmt(Math.round(p.val))+"</td><td>"+
+               fmt(Math.round(p.lo))+"</td><td>"+fmt(Math.round(p.hi))+"</td></tr>";
+        });
+        h += "</table>";
+      } else h += "<span class='bad'>not enough distinct years to fit a trend</span>";
+    }
+    d.innerHTML = h;
+  }
+
+  function onMessage(ev){
+    var m = ev.data;
+    if (!m || typeof m !== "object" || !m.columns || !m.data) return;
+    STATE = build(m);
+    if (DEBUG){ debugDump(m); return; }
+    if (!STATE){ document.getElementById("msg").textContent = "لا توجد بيانات كافية"; return; }
+    paint();
+  }
+  window.addEventListener("message", onMessage, false);
+
+  var pend=false;
+  function onResize(){
+    document.body.classList.toggle("compact", document.documentElement.clientHeight < 260);
+    if (pend) return; pend=true;
+    requestAnimationFrame(function(){ pend=false; if(STATE) paint(); });
+  }
+  if (window.ResizeObserver) new ResizeObserver(onResize).observe(document.documentElement);
+  window.addEventListener("resize", onResize, false);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(onResize);
+  onResize();
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window){
+    if (!Q.top) TOPOFF = "عدم الالتزام بخط السير";
+    onMessage({ data:{
+      resultName:"preview",
+      columns:[
+        {name:"c1",label:"created_year",type:"string",usage:"categorical"},
+        {name:"m1",label:"Drivers",     type:"number",usage:"quantitative"},
+        {name:"m2",label:"High risk",   type:"number",usage:"quantitative"},
+        {name:"m3",label:"Fines",       type:"number",usage:"quantitative"},
+        {name:"m4",label:"Tickets",     type:"number",usage:"quantitative"}
+      ],
+      data:[
+        [2022, 90000, 46000,  310000000, 560000],
+        [2023,104000, 54500,  372000000, 660000],
+        [2024,117000, 62000,  430000000, 745000],
+        [2025,129000, 69500,  486000000, 830000],
+        [2026,143765, 78200,  472000000, 845000]
+      ]
+    }});
+  }
+})();
+</script>
+</body>
+</html>
