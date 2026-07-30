@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Filter Bar — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content     Filter_Bar  v1 2026-07-29
+  =======================================================================
+  A row of report filters built from category columns. Each category becomes
+  either a DROPDOWN (more than 3 distinct values) or a BUTTON GROUP (3 or
+  fewer). Choosing a value posts a selection back to VA, exactly like clicking
+  a bar - so pointed at the report's objects via a Filter action it filters
+  the whole page.
+
+  DATA ROLES  ("Variables" role)
+  ------------------------------
+  Assign up to 10 CATEGORY columns, in the order you want them shown:
+
+      1. الجنسية        (CNT nationality)
+      2. صنف المركبة     (LIC_Type)
+      3. ...
+
+  PAIR EACH CATEGORY WITH A MEASURE if you can (any measure - a row count is
+  fine). VA only returns the DISTINCT values of a category when a measure
+  forces it to group; without one it may send raw detail rows. The object
+  copes either way, but a measure keeps the value lists tight and correct.
+  Measures are used only to derive distinct values; their numbers are ignored.
+
+  HOW FILTERING WORKS
+  -------------------
+  Selecting a value posts the ROWS of the result set that match it. In VA,
+  add a Filter action from this object to the targets you want filtered
+  (or to the whole page). The "الكل" (All) choice clears that column by
+  posting no rows for it - i.e. it removes the constraint rather than
+  filtering to a literal value called "All".
+
+  Because a DDC posts one flat set of selected rows, selecting values in
+  several columns at once filters on the COMBINATION present in the data. For
+  independent per-column filters, use several one-category Filter_Bar objects
+  side by side instead of one multi-category object - each then owns its own
+  filter action. This is the more common and more predictable setup.
+
+  URL PARAMETERS
+  --------------
+    ?threshold=3    max distinct values that render as buttons (else dropdown)
+    ?labels=A|B|C   override the display label of each category, in order
+    ?allWord=الكل   text for the clear/all option (default الكل)
+    ?buttonsOnly=1  force every control to buttons
+    ?dropdownsOnly=1 force every control to a dropdown
+    ?size=13        font size in px
+    ?font=0         skip the Google Fonts request
+    ?debug=1        show the categories and distinct values VA sent
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap">
+<style>
+  :root{
+    --mint:#00C993; --mint-2:#2BE5A8;
+    --label:#DCEFE8; --muted:#7E948C; --value:#00C993;
+    --chip-bg:rgba(255,255,255,.03); --chip-line:rgba(0,201,147,.28);
+    --pop-bg:#0B1F1A; --pop-line:rgba(0,201,147,.22);
+    --size:13px;
+    --ar:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;color:var(--label);font-family:var(--ar);
+       -webkit-font-smoothing:antialiased}
+  /* the bar scrolls sideways if there are more controls than width */
+  #bar{height:100%;width:100%;display:flex;align-items:center;gap:10px;
+       padding:6px 4px;overflow-x:auto;overflow-y:visible}
+  #bar::-webkit-scrollbar{height:4px}
+  #bar::-webkit-scrollbar-thumb{background:rgba(0,201,147,.35);border-radius:99px}
+
+  .legend{display:flex;align-items:center;gap:7px;color:var(--muted);
+          font-size:var(--size);flex:none;white-space:nowrap}
+  .legend svg{width:15px;height:15px}
+
+  /* a dropdown control ------------------------------------------------- */
+  .ctl{position:relative;flex:none}
+  .chip{display:inline-flex;align-items:center;gap:8px;cursor:pointer;
+        padding:7px 14px;border-radius:999px;white-space:nowrap;
+        background:var(--chip-bg);border:1px solid var(--chip-line);
+        font-size:var(--size);color:var(--label);transition:border-color .15s,background .15s}
+  .chip:hover{border-color:var(--mint)}
+  .chip .val{color:var(--value);font-weight:700}
+  .chip .car{width:0;height:0;border-inline:4px solid transparent;
+             border-top:5px solid var(--muted);margin-inline-start:2px}
+  .chip.active{border-color:var(--mint);background:rgba(0,201,147,.08)}
+
+  .pop{position:absolute;top:calc(100% + 6px);inset-inline-end:0;z-index:50;
+       min-width:190px;max-width:280px;max-height:260px;overflow:auto;
+       background:var(--pop-bg);border:1px solid var(--pop-line);border-radius:12px;
+       padding:5px;box-shadow:0 12px 34px rgba(0,0,0,.5);display:none}
+  .pop.open{display:block}
+  .pop .opt{display:flex;align-items:center;justify-content:space-between;gap:10px;
+            padding:8px 11px;border-radius:8px;cursor:pointer;font-size:var(--size);
+            color:var(--label);white-space:nowrap}
+  .pop .opt:hover{background:rgba(0,201,147,.10)}
+  .pop .opt.sel{color:var(--mint);font-weight:700}
+  .pop .opt.sel:after{content:"\2713";color:var(--mint)}
+  .pop .search{width:100%;margin-bottom:5px;padding:7px 10px;border-radius:8px;
+               background:rgba(255,255,255,.04);border:1px solid var(--pop-line);
+               color:var(--label);font-family:inherit;font-size:var(--size)}
+  .pop .search::placeholder{color:var(--muted)}
+
+  /* a button-group control --------------------------------------------- */
+  .btns{display:inline-flex;align-items:center;gap:3px;flex:none;
+        padding:3px;border-radius:11px;
+        background:var(--chip-bg);border:1px solid var(--chip-line)}
+  .btns .cap{font-size:calc(var(--size) - 1px);color:var(--muted);
+             padding:0 8px 0 4px;white-space:nowrap}
+  .btns button{font-family:inherit;font-size:calc(var(--size) - 1px);font-weight:500;
+        padding:5px 12px;border-radius:8px;border:0;cursor:pointer;white-space:nowrap;
+        background:transparent;color:var(--muted);transition:background .15s,color .15s}
+  .btns button:hover{color:var(--label)}
+  .btns button.on{background:var(--mint);color:#062B21;font-weight:700}
+
+  #msg{position:absolute;inset:0;display:flex;align-items:center;
+       color:var(--muted);font-size:12.5px;padding:0 12px;pointer-events:none}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;z-index:99;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.97);direction:ltr;text-align:left}
+  #dbg h4{margin:8px 0 4px;font-size:12px;color:var(--mint)}
+  #dbg table{border-collapse:collapse;margin:4px 0;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(0,201,147,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:var(--mint);font-weight:600}
+  #dbg .bad{color:#FF6B6B} #dbg .ok{color:var(--mint)}
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<div id="msg">في انتظار البيانات…</div>
+
+<script>
+(function(){
+  "use strict";
+  var VERSION = "Filter_Bar v1 2026-07-29";
+  console.log("[" + VERSION + "]");
+
+  var Q = {};
+  location.search.replace(/^\?/,"").split("&").forEach(function(kv){
+    if(!kv) return;
+    var i = kv.indexOf("=");
+    var k = decodeURIComponent(i<0?kv:kv.slice(0,i));
+    var v = i<0?"":decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));
+    Q[k]=v;
+  });
+  if (Q.font === "0"){ var g=document.getElementById("gfont"); if(g) g.remove(); }
+  if (Q.size) document.documentElement.style.setProperty("--size", parseInt(Q.size,10)+"px");
+
+  var THRESHOLD = Q.threshold ? parseInt(Q.threshold,10) : 3;
+  var ALLWORD   = Q.allWord !== undefined ? Q.allWord : "الكل";
+  var OVERRIDE  = Q.labels ? Q.labels.split("|") : null;
+  var FORCE     = Q.buttonsOnly === "1" ? "buttons" : (Q.dropdownsOnly === "1" ? "dropdown" : null);
+  var DEBUG     = Q.debug === "1";
+  var MAXCATS   = 10;
+
+  var bar = document.getElementById("bar");
+
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+
+  // one entry per category column: { label, colIdx, values:[{v,rows:[]}], sel }
+  var CATS = [], RESULT = null;
+
+  function parse(m){
+    var cols = m.columns || [], rows = m.data || [];
+    var catIdx = [];
+    cols.forEach(function(c,i){
+      var u = String(c.usage||"").toLowerCase(), t = String(c.type||"").toLowerCase();
+      var isMeasure = u === "quantitative" || (!u && t === "number");
+      if (!isMeasure) catIdx.push(i);
+    });
+    catIdx = catIdx.slice(0, MAXCATS);
+
+    return catIdx.map(function(ci, n){
+      var map = {}, order = [];
+      rows.forEach(function(r, ri){
+        var v = r[ci];
+        if (v === null || v === undefined || v === "") return;
+        var key = String(v);
+        if (!(key in map)){ map[key] = { v:key, rows:[] }; order.push(key); }
+        map[key].rows.push(ri);
+      });
+      order.sort(function(a,b){ return a.localeCompare(b, "ar"); });
+      return {
+        label: (OVERRIDE && OVERRIDE[n]) || cols[ci].label || cols[ci].name || ("فلتر " + (n+1)),
+        colIdx: ci,
+        values: order.map(function(k){ return map[k]; }),
+        sel: null                    // null = "all"
+      };
+    });
+  }
+
+  function kind(cat){
+    if (FORCE) return FORCE;
+    return cat.values.length <= THRESHOLD ? "buttons" : "dropdown";
+  }
+
+  /* ------- send the union of selected rows across all categories ------- */
+  function pushSelection(){
+    // Filter semantics: a column with a selection contributes its matching
+    // rows; a column left on "all" contributes nothing (no constraint).
+    var rowSet = null;
+    CATS.forEach(function(cat){
+      if (cat.sel === null) return;
+      var val = cat.values.filter(function(x){ return x.v === cat.sel; })[0];
+      var rs = val ? val.rows : [];
+      // intersect across columns that DO have a selection
+      if (rowSet === null) rowSet = rs.slice();
+      else rowSet = rowSet.filter(function(ri){ return rs.indexOf(ri) !== -1; });
+    });
+    var sels = (rowSet || []).map(function(ri){ return { row: ri }; });
+    try { window.parent.postMessage({ resultName: RESULT, selections: sels }, "*"); } catch(e){}
+  }
+
+  /* ----------------------------- rendering ---------------------------- */
+  var FUNNEL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+    'stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v6l-4-2v-4L3 5Z"/></svg>';
+
+  function render(){
+    document.getElementById("msg").style.display = CATS.length ? "none" : "flex";
+    bar.innerHTML = "";
+    if (!CATS.length) return;
+
+    var lg = document.createElement("div");
+    lg.className = "legend";
+    lg.innerHTML = FUNNEL + "<span>عوامل التصفية</span>";
+    bar.appendChild(lg);
+
+    CATS.forEach(function(cat, idx){
+      bar.appendChild(kind(cat) === "buttons" ? buildButtons(cat, idx) : buildDropdown(cat, idx));
+    });
+  }
+
+  function buildButtons(cat, idx){
+    var wrap = document.createElement("div");
+    wrap.className = "btns";
+    var opts = [{v:null, t:ALLWORD}].concat(cat.values.map(function(x){ return {v:x.v, t:x.v}; }));
+    wrap.innerHTML = '<span class="cap">' + esc(cat.label) + "</span>" +
+      opts.map(function(o){
+        var on = (cat.sel === o.v) || (cat.sel === null && o.v === null);
+        return '<button type="button" data-idx="' + idx + '" data-v="' +
+               (o.v === null ? "\u0000" : esc(o.v)) + '"' + (on ? ' class="on"' : "") +
+               ">" + esc(o.t) + "</button>";
+      }).join("");
+    return wrap;
+  }
+
+  function buildDropdown(cat, idx){
+    var ctl = document.createElement("div");
+    ctl.className = "ctl";
+    var current = cat.sel === null ? ALLWORD : cat.sel;
+    ctl.innerHTML =
+      '<div class="chip' + (cat.sel !== null ? " active" : "") + '" data-toggle="' + idx + '">' +
+        '<span>' + esc(cat.label) + "</span>" +
+        '<span class="val">' + esc(current) + "</span>" +
+        '<span class="car"></span>' +
+      "</div>" +
+      '<div class="pop" data-pop="' + idx + '">' +
+        (cat.values.length > 8 ? '<input class="search" placeholder="بحث…" data-search="' + idx + '">' : "") +
+        '<div class="opt' + (cat.sel === null ? " sel" : "") + '" data-idx="' + idx +
+           '" data-v="\u0000">' + esc(ALLWORD) + "</div>" +
+        cat.values.map(function(x){
+          return '<div class="opt' + (cat.sel === x.v ? " sel" : "") + '" data-idx="' + idx +
+                 '" data-v="' + esc(x.v) + '">' + esc(x.v) + "</div>";
+        }).join("") +
+      "</div>";
+    return ctl;
+  }
+
+  /* ------------------------------ events ------------------------------ */
+  function choose(idx, raw){
+    var cat = CATS[idx];
+    cat.sel = (raw === "\u0000") ? null : raw;
+    closeAll();
+    render();
+    pushSelection();
+  }
+  function closeAll(){
+    [].forEach.call(document.querySelectorAll(".pop.open"), function(p){ p.classList.remove("open"); });
+  }
+
+  document.addEventListener("click", function(ev){
+    var tog = ev.target.closest("[data-toggle]");
+    if (tog){
+      var i = tog.getAttribute("data-toggle");
+      var pop = document.querySelector('.pop[data-pop="' + i + '"]');
+      var wasOpen = pop.classList.contains("open");
+      closeAll();
+      if (!wasOpen){ pop.classList.add("open"); var sb = pop.querySelector(".search"); if (sb) sb.focus(); }
+      ev.stopPropagation();
+      return;
+    }
+    var opt = ev.target.closest(".opt[data-idx]");
+    if (opt){ choose(parseInt(opt.getAttribute("data-idx"),10), opt.getAttribute("data-v")); return; }
+    var btn = ev.target.closest(".btns button[data-idx]");
+    if (btn){ choose(parseInt(btn.getAttribute("data-idx"),10), btn.getAttribute("data-v")); return; }
+    closeAll();
+  });
+
+  document.addEventListener("input", function(ev){
+    var sb = ev.target.closest("[data-search]");
+    if (!sb) return;
+    var pop = sb.closest(".pop");
+    var q = sb.value.trim();
+    [].forEach.call(pop.querySelectorAll(".opt"), function(o){
+      o.style.display = (!q || o.textContent.indexOf(q) !== -1) ? "" : "none";
+    });
+  });
+
+  function dump(m){
+    var d = document.getElementById("dbg");
+    if(!d){ d=document.createElement("div"); d.id="dbg"; document.body.appendChild(d); }
+    var h = "<h4>Filter_Bar debug</h4>version: <b class='ok'>"+VERSION+"</b><br>";
+    h += "rows from VA: <b>"+(m.data||[]).length+"</b>";
+    if (m.availableRowCount !== undefined && m.availableRowCount > m.rowCount)
+      h += " <span class='bad'>of "+m.availableRowCount+" - TRUNCATED, value lists may be incomplete</span>";
+    h += "<br>categories detected: <b class='"+(CATS.length?"ok":"bad")+"'>"+CATS.length+"</b> (max "+MAXCATS+")<br>";
+    CATS.forEach(function(c){
+      h += "<h4>"+esc(c.label)+" \u2192 "+kind(c)+" ("+c.values.length+" values)</h4>";
+      h += "<table><tr><th>value</th><th>matching rows</th></tr>";
+      c.values.slice(0,12).forEach(function(x){
+        h += "<tr><td>"+esc(x.v)+"</td><td>"+x.rows.length+"</td></tr>";
+      });
+      if (c.values.length > 12) h += "<tr><td>… "+(c.values.length-12)+" more</td><td></td></tr>";
+      h += "</table>";
+    });
+    if (!CATS.length) h += "<span class='bad'>No categories found. Assign category columns to the Variables role.</span>";
+    d.innerHTML = h;
+  }
+
+  function onMessage(ev){
+    var m = ev.data;
+    if (!m || typeof m !== "object" || !m.columns || !m.data) return;
+    RESULT = m.resultName || RESULT;
+    var prev = {};
+    CATS.forEach(function(c){ prev[c.label] = c.sel; });
+    CATS = parse(m);
+    // preserve selections across data refreshes where possible
+    CATS.forEach(function(c){
+      if (prev[c.label] !== undefined && prev[c.label] !== null &&
+          c.values.some(function(x){ return x.v === prev[c.label]; })) c.sel = prev[c.label];
+    });
+    if (DEBUG){ dump(m); return; }
+    render();
+  }
+  window.addEventListener("message", onMessage, false);
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window){
+    onMessage({ data:{
+      resultName:"preview",
+      columns:[
+        {name:"c1",label:"الجنسية",     type:"string",usage:"categorical"},
+        {name:"m1",label:"n1",          type:"number",usage:"quantitative"},
+        {name:"c2",label:"صنف المركبة",  type:"string",usage:"categorical"},
+        {name:"m2",label:"n2",          type:"number",usage:"quantitative"},
+        {name:"c3",label:"مصدر اللوحة",  type:"string",usage:"categorical"},
+        {name:"m3",label:"n3",          type:"number",usage:"quantitative"},
+        {name:"c4",label:"مواطن/مقيم",   type:"string",usage:"categorical"}
+      ],
+      data:[
+        ["الإمارات",1,"مركبة خفيفة",1,"خصوصي",1,"مواطن"],
+        ["الهند",1,"دراجة نارية",1,"تجاري",1,"مقيم"],
+        ["باكستان",1,"نقل ثقيل",1,"عمومي",1,"مقيم"],
+        ["مصر",1,"باص",1,"أجرة",1,"مقيم"],
+        ["الفلبين",1,"مركبة خفيفة اوتوماتك",1,"خصوصي",1,"مقيم"]
+      ]
+    }});
+  }
+})();
+</script>
+</body>
+</html>
