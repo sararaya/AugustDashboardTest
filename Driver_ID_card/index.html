@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Driver Card — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content     Driver_Card  v1 2026-07-29
+  ========================================================================
+  An introduction card for ONE driver. Pair it with a VA control (a text
+  filter on Traffic No, or a list on the name) so the report narrows to a
+  single driver; this DDC then renders that driver's details.
+
+  Transparent background, RTL, no title of its own.
+
+  DATA ROLES  ("Variables" role, in THIS order)
+  ---------------------------------------------
+    1. Name           CATEGORY   NAME_A
+    2. Nationality    CATEGORY   CNT_description_A
+    3. Gender         MEASURE    GENDER (values 1/2; here 2 = male, 1 = female,
+                                 set with ?maleCode=)
+    4. Age            MEASURE    AGE, or a BIRTH_DATE (a date becomes an age)
+    5. Traffic No     CATEGORY   Traffic No -> shown as رقم الملف
+    6. Occupation     CATEGORY   OCCUPATION_DESC
+    7. Danger level   CATEGORY   DANGER_CATEGORY_DESC, or the 1-4 code
+
+  Gender and Age are BOTH measures and sit next to each other. The card tells
+  them apart by value (a gender code is 1 or 2, an age is larger), so a
+  swapped assignment still renders correctly.
+
+  Only ONE driver is expected. If several rows arrive (the filter did not
+  narrow to one) the FIRST row is shown and a small note appears; use ?debug=1
+  to see the whole result set.
+
+  THE DANGER BADGE
+  ----------------
+  The mock shows four reference bubbles (low / medium / dangerous / highly
+  dangerous); the card renders only the ONE matching this driver, coloured by
+  level. Set ?levels= to remap wording, e.g.
+     ?levels=low:منخفض|medium:متوسط|dangerous:خطر|highly dangerous:عالي الخطورة
+  Numeric 1-4 also map to those four levels in order.
+
+  URL PARAMETERS
+  --------------
+    ?levels=...      code:label pairs, | separated (see above)
+    ?genderMap=1:ذكر|2:أنثى   remap gender codes to words
+    ?size=15         base font size in px
+    ?font=0          skip the Google Fonts request
+    ?debug=1         show what VA sent
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap">
+<style>
+  :root{
+    --name:#F3FAF6; --label:#8FB3A6; --value:#EAF7F1; --accent:#2BE0A6;
+    --size:15px;
+    --ar:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+    /* danger palette, low -> high */
+    --lo-bg:rgba(23,150,110,.14);   --lo-line:#1F9D74;   --lo-tx:#43D6A2;
+    --md-bg:rgba(180,150,40,.14);   --md-line:#B49628;   --md-tx:#E4C24A;
+    --hi-bg:rgba(196,120,30,.15);   --hi-line:#C4781E;   --hi-tx:#E39A3A;
+    --xh-bg:rgba(196,70,60,.15);    --xh-line:#C4463C;   --xh-tx:#E0625C;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;color:var(--value);font-family:var(--ar);
+       overflow:hidden;-webkit-font-smoothing:antialiased}
+  #card{height:100%;width:100%;min-height:0;min-width:0;padding:.5em .7em;
+        font-size:var(--size);
+        display:flex;flex-direction:column;justify-content:center;gap:.8em;text-align:right}
+  /* when wide enough, name + meta share one row (name first, at the RTL start) */
+  #card.inline #headline{display:flex;flex-direction:row;align-items:baseline;
+        flex-wrap:nowrap;gap:.9em}
+  #card.inline .name{flex:none}
+  #card.inline .meta{flex:1 1 auto;min-width:0}
+
+  .name{font-size:1.87em;font-weight:800;color:var(--name);
+        line-height:1.15;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  .meta{display:flex;flex-wrap:wrap;gap:.27em .4em;align-items:baseline;
+        font-size:1em;color:var(--label);line-height:1.7}
+  .meta .pair{white-space:nowrap}
+  .meta .k{color:var(--label)}
+  .meta .v{color:var(--value);font-weight:700}
+  .meta .dot{color:rgba(143,179,166,.5);padding:0 4px}
+
+  .badges{display:flex;gap:.6em;flex-wrap:wrap;margin-top:.13em}
+  .badge{display:inline-flex;align-items:center;justify-content:center;
+         padding:.47em 1.33em;border-radius:999px;font-size:1em;font-weight:700;
+         border:1px solid;white-space:nowrap}
+  .badge.lo{background:var(--lo-bg);border-color:var(--lo-line);color:var(--lo-tx)}
+  .badge.md{background:var(--md-bg);border-color:var(--md-line);color:var(--md-tx)}
+  .badge.hi{background:var(--hi-bg);border-color:var(--hi-line);color:var(--hi-tx)}
+  .badge.xh{background:var(--xh-bg);border-color:var(--xh-line);color:var(--xh-tx)}
+
+  #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+       color:var(--label);font-size:13px;text-align:center;padding:20px;pointer-events:none}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;z-index:20;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.97);direction:ltr;text-align:left}
+  #dbg h4{margin:8px 0 4px;font-size:12px;color:var(--accent)}
+  #dbg table{border-collapse:collapse;margin:4px 0;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(43,224,166,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:var(--accent);font-weight:600}
+  #dbg .bad{color:#FF6B6B} #dbg .ok{color:var(--accent)}
+
+  #note{font-size:.8em;color:rgba(143,179,166,.7)}
+</style>
+</head>
+<body>
+<div id="card" style="display:none">
+  <div id="headline">
+    <div class="name" id="name"></div>
+    <div class="meta" id="meta"></div>
+  </div>
+  <div class="badges" id="badges"></div>
+  <div id="note"></div>
+</div>
+<div id="msg">في انتظار اختيار سائق…</div>
+
+<script>
+(function(){
+  "use strict";
+  var VERSION = "Driver_Card v1 2026-07-29";
+  console.log("[" + VERSION + "]");
+
+  var Q = {};
+  location.search.replace(/^\?/,"").split("&").forEach(function(kv){
+    if(!kv) return;
+    var i = kv.indexOf("=");
+    Q[decodeURIComponent(i<0?kv:kv.slice(0,i))] = i<0?"":decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));
+  });
+  if (Q.font === "0"){ var g=document.getElementById("gfont"); if(g) g.remove(); }
+  var FIXED = Q.size ? parseInt(Q.size,10) : null;   // ?size= pins, disables auto
+  if (FIXED) document.documentElement.style.setProperty("--size", FIXED+"px");
+
+  /* Derive the base font size from the container so the whole card scales to
+     fit. Everything in the CSS is expressed in em relative to this, so one
+     number drives name, meta, badge, gaps and padding together. Width and
+     height both constrain it, and it is clamped to a sensible range. */
+  function autoSize(){
+    if (!FIXED){
+      var w = document.documentElement.clientWidth,
+          h = document.documentElement.clientHeight;
+      if (w >= 20 && h >= 20){
+        var byH = h / 7.5, byW = w / 26;
+        var s = Math.max(9, Math.min(26, Math.min(byH, byW)));
+        document.documentElement.style.setProperty("--size", s.toFixed(1)+"px");
+      }
+    }
+    tryInline();
+  }
+
+  /* Put the name and meta on ONE line when the container is wide enough to
+     hold them without the meta text truncating; otherwise stack them. Measured
+     rather than guessed, so it adapts to name length and font size together. */
+  function tryInline(){
+    var card = document.getElementById("card");
+    if (card.style.display === "none") return;
+    card.classList.remove("inline");
+    var name = document.getElementById("name"),
+        meta = document.getElementById("meta");
+    if (!name.textContent || !meta.textContent) return;
+    var avail = document.documentElement.clientWidth - 24;   // padding allowance
+    // natural widths when not wrapped
+    var need = name.scrollWidth + meta.scrollWidth + 18;     // + gap
+    if (need <= avail) card.classList.add("inline");
+  }
+  var DEBUG = Q.debug === "1";
+
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+  function has(v){ return v!==null && v!==undefined && String(v).trim()!==""; }
+
+  /* ---- gender: accept codes or words ---- */
+  var GENDER = {"m":"ذكر","male":"ذكر","f":"أنثى","female":"أنثى",
+                "ذكر":"ذكر","انثى":"أنثى","أنثى":"أنثى"};
+  var MALE_CODE = 2;   // this data: 2 = male, 1 = female. Override with ?maleCode=
+  if (Q.maleCode) MALE_CODE = parseInt(Q.maleCode,10);
+  if (Q.genderMap) Q.genderMap.split("|").forEach(function(p){
+    var kv=p.split(":"); if(kv.length===2) GENDER[kv[0].trim().toLowerCase()]=kv[1]; });
+  function genderWord(v){
+    if (!has(v)) return "";
+    var s = String(v).trim();
+    // VA may format a numeric category as "1.0", "1,000" etc. Parse it as a
+    // number (thousands separators removed) and round, rather than stripping
+    // punctuation blindly - "1.0" must read as 1, not 10.
+    var n = parseFloat(s.replace(/,/g,""));
+    if (!isNaN(n)) return Math.round(n) === MALE_CODE ? "ذكر" : "أنثى";
+    return GENDER[s.toLowerCase()] || s;
+  }
+
+  /* ---- danger level -> {cls, label} ---- */
+  var LEVELS = {
+    "1":{cls:"lo",label:"منخفض"}, "low":{cls:"lo",label:"منخفض"}, "منخفض":{cls:"lo",label:"منخفض"},
+    "2":{cls:"md",label:"متوسط"}, "medium":{cls:"md",label:"متوسط"}, "متوسط":{cls:"md",label:"متوسط"},
+    "3":{cls:"hi",label:"خطر"},   "dangerous":{cls:"hi",label:"خطر"}, "خطر":{cls:"hi",label:"خطر"},
+    "4":{cls:"xh",label:"عالي الخطورة"}, "highly dangerous":{cls:"xh",label:"عالي الخطورة"},
+    "عالي الخطورة":{cls:"xh",label:"عالي الخطورة"}
+  };
+  // ?levels=code:label|... overrides only the wording, keeps the colour tier
+  if (Q.levels) Q.levels.split("|").forEach(function(p){
+    var idx=p.indexOf(":"); if(idx<0) return;
+    var code=p.slice(0,idx).trim().toLowerCase(), lab=p.slice(idx+1);
+    if (LEVELS[code]) LEVELS[code] = {cls:LEVELS[code].cls, label:lab};
+  });
+  function levelOf(v){
+    if (!has(v)) return null;
+    return LEVELS[String(v).trim().toLowerCase()] || {cls:"md", label:String(v)};
+  }
+
+  /* ---- age: a number stays, a date becomes an age ---- */
+  function ageOf(v){
+    if (!has(v)) return "";
+    var n = Number(v);
+    if (!isNaN(n) && n > 0 && n < 130) return String(Math.round(n));
+    var d = new Date(v);
+    if (!isNaN(d.getTime())){
+      var t = new Date();
+      var a = t.getFullYear() - d.getFullYear();
+      if (t.getMonth() < d.getMonth() || (t.getMonth()===d.getMonth() && t.getDate()<d.getDate())) a--;
+      if (a > 0 && a < 130) return String(a);
+    }
+    return "";
+  }
+
+  /* ---- split columns into categories and measures, keep order ---- */
+  function classify(columns){
+    return columns.map(function(c,i){
+      var u = String(c.usage||"").toLowerCase(), t = String(c.type||"").toLowerCase();
+      return { i:i, measure: (u==="quantitative" || (!u && t==="number")), label:c.label||c.name, type:t };
+    });
+  }
+
+  /* Roles are positional, but VA groups the result columns by KIND (all
+     categories, then all measures) rather than by assignment order. Age is the
+     only measure, so we read the six categories in order and take the first
+     measure as age. This keeps every field aligned no matter how VA orders
+     the columns internally. */
+  /* Roles, in assignment order:
+       1 name        CATEGORY
+       2 nationality CATEGORY
+       3 gender      MEASURE   (values 1 or 2)
+       4 age         MEASURE   (a real age, or a birth date)
+       5 traffic no  CATEGORY
+       6 occupation  CATEGORY
+       7 danger      CATEGORY
+     VA groups the delivered columns by KIND, so we collect categories and
+     measures into separate ordered lists and read each slot from the right
+     list. That keeps every field aligned however VA orders the columns. */
+  function readDriver(columns, row){
+    var cats = [], meas = [];
+    columns.forEach(function(c,i){
+      var u = String(c.usage||"").toLowerCase(), t = String(c.type||"").toLowerCase();
+      var isMeasure = u==="quantitative" || (!u && t==="number");
+      (isMeasure ? meas : cats).push(i);
+    });
+    function cat(n){ return cats[n]!==undefined ? row[cats[n]] : undefined; }
+
+    // Two measures: gender and age. Assignment order is gender then age, but
+    // disambiguate by VALUE as a safety net - a gender code is 1 or 2, an age
+    // is far larger - so a swapped assignment still renders correctly.
+    var genderVal, ageVal;
+    if (meas.length >= 2){
+      var a = row[meas[0]], b = row[meas[1]];
+      var na = Number(a), nb = Number(b);
+      var aLooksGender = !isNaN(na) && (na === 1 || na === 2);
+      var bLooksGender = !isNaN(nb) && (nb === 1 || nb === 2);
+      if (aLooksGender && !bLooksGender){ genderVal = a; ageVal = b; }
+      else if (bLooksGender && !aLooksGender){ genderVal = b; ageVal = a; }
+      else { genderVal = a; ageVal = b; }         // default to assignment order
+    } else if (meas.length === 1){
+      // only one measure assigned - treat 1/2 as gender, otherwise age
+      var only = row[meas[0]], n = Number(only);
+      if (!isNaN(n) && (n === 1 || n === 2)) genderVal = only; else ageVal = only;
+    }
+
+    return {
+      name:    cat(0),
+      nat:     cat(1),
+      traffic: cat(2),
+      occ:     cat(3),
+      danger:  cat(4),
+      gender:  genderVal,
+      age:     ageVal
+    };
+  }
+
+  var msg = document.getElementById("msg"),
+      card = document.getElementById("card");
+
+  function render(columns, rows){
+    if (!rows.length){ card.style.display="none"; msg.style.display="flex";
+                       msg.textContent="لا يوجد سائق مطابق"; return; }
+    msg.style.display="none"; card.style.display="flex";
+
+    var d = readDriver(columns, rows[0]);
+
+    document.getElementById("name").textContent = has(d.name) ? String(d.name) : "—";
+
+    var bits = [];
+    if (has(d.nat))    bits.push(['الجنسية', String(d.nat)]);
+    var gw = genderWord(d.gender);        if (gw) bits.push(['الجنس', gw]);
+    var ag = ageOf(d.age);                if (ag) bits.push(['العمر', ag]);
+    if (has(d.traffic))bits.push(['رقم الملف', String(d.traffic)]);
+    if (has(d.occ))    bits.push(['الوظيفة', String(d.occ)]);
+
+    document.getElementById("meta").innerHTML = bits.map(function(b,i){
+      return (i? '<span class="dot">·</span>' : "") +
+        '<span class="pair"><span class="k">' + esc(b[0]) + ':</span> ' +
+        '<span class="v">' + esc(b[1]) + "</span></span>";
+    }).join("");
+
+    var lvl = levelOf(d.danger);
+    document.getElementById("badges").innerHTML = lvl
+      ? '<span class="badge ' + lvl.cls + '">' + esc(lvl.label) + "</span>" : "";
+
+    document.getElementById("note").textContent =
+      rows.length > 1 ? "⚠ الفلتر لم يحصر النتيجة بسائق واحد (" + rows.length + " صفوف) — يعرض الأول" : "";
+
+    autoSize();
+  }
+
+  function debugDump(m){
+    var d = document.getElementById("dbg");
+    if(!d){ d=document.createElement("div"); d.id="dbg"; document.body.appendChild(d); }
+    var cols=m.columns||[], rows=m.data||[];
+    var h = "<h4>Driver_Card debug</h4>version: <b class='ok'>"+VERSION+"</b><br>";
+    h += "rows: <b class='"+(rows.length===1?"ok":"bad")+"'>"+rows.length+"</b> "+
+         (rows.length===1?"(one driver - good)":"(filter should narrow to ONE driver)")+"<br><br>";
+    h += "<table><tr><th>slot</th><th>column</th><th>usage</th><th>row1</th></tr>";
+    cols.forEach(function(c,i){
+      h += "<tr><td>col "+(i+1)+"</td><td>"+esc(c.label||c.name)+"</td><td>"+
+           esc(c.usage||"")+"</td><td>"+esc(String(rows.length?rows[0][i]:""))+"</td></tr>";
+    });
+    h += "</table>";
+    if (rows.length){
+      var d = readDriver(cols, rows[0]);
+      h += "<h4>resolved fields</h4><table><tr><th>field</th><th>value</th></tr>";
+      [["name",d.name],["nationality",d.nat],["gender(raw)",d.gender],["age(raw)",d.age],
+       ["traffic",d.traffic],["occupation",d.occ],["danger",d.danger]].forEach(function(r){
+        h += "<tr><td>"+r[0]+"</td><td>"+esc(String(r[1]))+"</td></tr>";
+      });
+      h += "</table>";
+    }
+    d.innerHTML = h;
+  }
+
+  function onMessage(ev){
+    var m = ev.data;
+    if (!m || typeof m!=="object" || !m.columns || !m.data) return;
+    if (DEBUG){ debugDump(m); return; }
+    render(m.columns, m.data);
+  }
+  window.addEventListener("message", onMessage, false);
+
+  var pend=false;
+  function onResize(){
+    if(pend)return; pend=true;
+    requestAnimationFrame(function(){ pend=false; autoSize(); });
+  }
+  if (window.ResizeObserver) new ResizeObserver(onResize).observe(document.documentElement);
+  window.addEventListener("resize", onResize, false);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(autoSize);
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window){
+    onMessage({ data:{
+      resultName:"preview",
+      columns:[
+        {name:"c1",label:"NAME_A",           type:"string",usage:"categorical"},
+        {name:"c2",label:"CNT_description_A", type:"string",usage:"categorical"},
+        {name:"m1",label:"GENDER",           type:"number",usage:"quantitative"},
+        {name:"m2",label:"AGE",              type:"number",usage:"quantitative"},
+        {name:"c3",label:"Traffic No",       type:"string",usage:"categorical"},
+        {name:"c4",label:"OCCUPATION_DESC",  type:"string",usage:"categorical"},
+        {name:"c5",label:"DANGER_CATEGORY_DESC",type:"string",usage:"categorical"}
+      ],
+      data:[["محمد أحمد علي الكتبي","الإمارات",2,44,"5842107","سائق","highly dangerous"]]
+    }});
+  }
+})();
+</script>
+</body>
+</html>
