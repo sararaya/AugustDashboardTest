@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Top Category — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content     Top_Category  v1 2026-07-29
+  =========================================================================
+  A key-value tile for CATEGORICAL data: given a category and a measure, it
+  shows the single most frequent (highest-ranked) category value. Bare text,
+  no sentence, no padding, pinned to the TOP-RIGHT (the RTL start corner) so
+  it never drifts when the container resizes. The value's font scales with
+  the container WIDTH.
+
+  DATA ROLES  ("Variables" role)
+  ------------------------------
+    1. Category   required   the column to rank, e.g. OFFENCE_DESCRIPTION_A
+    2. Measure    required   how to rank it, e.g. TICKET_NO aggregation COUNT
+
+  Filter-responsive: the ranking recomputes from whatever rows VA sends, so
+  it always reflects the current filters.
+
+  URL PARAMETERS
+  --------------
+    ?rank=1       which place to show (1 = most frequent; 2 = runner-up ...)
+    ?sub=1        show the measure value beneath the label (default off)
+    ?align=start  right | start | center   (default right = top-right)
+    ?max=28       largest font size in px the width-fit may reach (default 30)
+    ?min=11       smallest font size (default 11)
+    ?font=0       skip the Google Fonts request
+    ?debug=1      show the full ranking VA sent
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap">
+<style>
+  :root{
+    --mint:#00C993; --value:#F3FAF6; --muted:#84A89B;
+    --size:24px;
+    --ar:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;color:var(--value);font-family:var(--ar);
+       overflow:hidden;-webkit-font-smoothing:antialiased}
+  /* pinned top-right, zero padding */
+  #wrap{height:100%;width:100%;padding:0;
+        display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start}
+  body.center #wrap{align-items:center}
+  body.startx #wrap{align-items:flex-end}   /* physical left */
+
+  #val{font-size:var(--size);font-weight:800;line-height:1.15;color:var(--value);
+       max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+       text-align:right}
+  #sub{font-size:calc(var(--size) * .45);font-weight:700;color:var(--mint);
+       line-height:1.3;margin-top:.15em;font-variant-numeric:tabular-nums;direction:ltr}
+  body.center #val,body.center #sub{text-align:center}
+
+  #msg{position:absolute;inset:0;display:flex;align-items:flex-start;
+       color:var(--muted);font-size:12px;pointer-events:none}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;z-index:9;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.97);direction:ltr;text-align:left}
+  #dbg h4{margin:0 0 6px;font-size:12px;color:var(--mint)}
+  #dbg table{border-collapse:collapse;margin:4px 0;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(0,201,147,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:var(--mint);font-weight:600}
+  #dbg .bad{color:#FF6B6B} #dbg .ok{color:var(--mint)}
+</style>
+</head>
+<body>
+<div id="wrap"><span id="msg">في انتظار البيانات…</span></div>
+<script>
+(function(){
+  "use strict";
+  var VERSION = "Top_Category v1 2026-07-29";
+  console.log("[" + VERSION + "]");
+
+  var Q = {};
+  location.search.replace(/^\?/,"").split("&").forEach(function(kv){
+    if(!kv) return;
+    var i = kv.indexOf("=");
+    Q[decodeURIComponent(i<0?kv:kv.slice(0,i))] = i<0?"":decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));
+  });
+  if (Q.font === "0"){ var g=document.getElementById("gfont"); if(g) g.remove(); }
+  if (Q.align === "center") document.body.classList.add("center");
+  if (Q.align === "start")  document.body.classList.add("startx");
+
+  var RANK = Q.rank ? Math.max(1, parseInt(Q.rank,10)) : 1;
+  var SUB  = Q.sub === "1";
+  var MAXS = Q.max ? parseInt(Q.max,10) : 30;
+  var MINS = Q.min ? parseInt(Q.min,10) : 11;
+  var DEBUG = Q.debug === "1";
+
+  var wrap = document.getElementById("wrap");
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+  function num(n){ return Number(n).toLocaleString("en-US",{maximumFractionDigits:0}); }
+
+  var RANKED = [];
+
+  function pick(columns){
+    var cat=-1, meas=-1;
+    columns.forEach(function(c,i){
+      var u=String(c.usage||"").toLowerCase(), t=String(c.type||"").toLowerCase();
+      var isM = u==="quantitative" || (!u && t==="number");
+      if (isM){ if(meas===-1) meas=i; }
+      else if (cat===-1) cat=i;
+    });
+    if (cat===-1) cat=0;
+    if (meas===-1) meas=(cat===0?1:0);
+    return {cat:cat, val:meas};
+  }
+
+  function onMessage(ev){
+    var m = ev.data;
+    if(!m || typeof m!=="object" || !m.columns || !m.data) return;
+    var p = pick(m.columns), rows = m.data || [];
+    var acc = {};
+    rows.forEach(function(r){
+      var k = String(r[p.cat]);
+      if (k===""||k==="null"||k==="undefined") return;
+      var v = Number(r[p.val]); if (isNaN(v)) v = 0;
+      acc[k] = (acc[k]||0) + v;
+    });
+    RANKED = Object.keys(acc).map(function(k){ return {k:k,v:acc[k]}; })
+                   .sort(function(a,b){ return b.v - a.v; });
+    if (DEBUG){ dump(m); return; }
+    render();
+  }
+
+  function render(){
+    var win = RANKED[RANK-1];
+    document.getElementById("msg") && (document.getElementById("msg").style.display = win ? "none":"flex");
+    if (!win){ wrap.innerHTML = '<span id="msg">لا توجد بيانات</span>'; return; }
+    wrap.innerHTML =
+      '<span id="val" title="' + esc(win.k) + '">' + esc(win.k) + "</span>" +
+      (SUB ? '<span id="sub">' + num(win.v) + "</span>" : "");
+    fit();
+  }
+
+  /* Scale the value to the container WIDTH: start at the max size and step
+     down until it fits on one line, down to the min. Runs in rAF so a resize
+     drag does not thrash layout. */
+  function fit(){
+    var val = document.getElementById("val");
+    if (!val) return;
+    var avail = document.documentElement.clientWidth;   // no padding
+    if (avail <= 0) return;
+    var s = MAXS;
+    document.documentElement.style.setProperty("--size", s+"px");
+    var guard = 0;
+    while (val.scrollWidth > avail && s > MINS && guard++ < 80){
+      s -= 1;
+      document.documentElement.style.setProperty("--size", s+"px");
+    }
+  }
+
+  function dump(m){
+    var d = document.getElementById("dbg");
+    if(!d){ d=document.createElement("div"); d.id="dbg"; document.body.appendChild(d); }
+    var h = "<h4>Top_Category debug</h4>version: <b class='ok'>"+VERSION+"</b><br>";
+    h += "rows: <b>"+(m.data||[]).length+"</b>";
+    if (m.availableRowCount !== undefined && m.availableRowCount > m.rowCount)
+      h += " <span class='bad'>of "+m.availableRowCount+" - TRUNCATED, ranking may be wrong</span>";
+    h += "<br>showing rank <b>"+RANK+"</b><br><br>";
+    h += "<table><tr><th>#</th><th>value</th><th>measure</th></tr>";
+    RANKED.slice(0,15).forEach(function(r,i){
+      h += "<tr><td>"+(i+1)+"</td><td>"+esc(r.k)+"</td><td>"+num(r.v)+"</td></tr>";
+    });
+    h += "</table>";
+    if (RANKED.length && RANKED[0].v > 1e8)
+      h += "<span class='bad'>values look implausibly large - the measure may be " +
+           "aggregating an ID column as SUM rather than COUNT.</span>";
+    d.innerHTML = h;
+  }
+
+  window.addEventListener("message", onMessage, false);
+  var pend=false;
+  function onResize(){ if(pend)return; pend=true;
+    requestAnimationFrame(function(){ pend=false; fit(); }); }
+  if (window.ResizeObserver) new ResizeObserver(onResize).observe(document.documentElement);
+  window.addEventListener("resize", onResize, false);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window){
+    onMessage({ data:{
+      resultName:"preview",
+      columns:[
+        {name:"c1",label:"OFFENCE_DESCRIPTION_A",type:"string",usage:"categorical"},
+        {name:"m1",label:"Tickets",type:"number",usage:"quantitative"}
+      ],
+      data:[
+        ["تجاوز السرعة المقررة بين 30 و60 كم/س",198],
+        ["تجاوز الإشارة الضوئية الحمراء",154],
+        ["التجاوز الخطر",132]
+      ]
+    }});
+  }
+})();
+</script>
+</body>
+</html>
