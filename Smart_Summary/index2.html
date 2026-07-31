@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>التحليل الذكي للسائق — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content   Driver_Insight  v1 2026-07-29
+  =========================================================================
+  A per-driver narrative pill, in the Smart-Summary style but describing ONE
+  driver. Pair with a filter that narrows to a single driver; the sentence
+  then summarises that driver.
+
+  DATA ROLES  ("Variables" role, in THIS order)
+  ---------------------------------------------
+    1. Name          CATEGORY   NAME_A                     -> {name}
+    2. Danger level  CATEGORY   DANGER_CATEGORY_DESC       -> {danger}  (coloured)
+    3. Offence score MEASURE    OFFENCE_SCORE, aggregate AVERAGE -> {score}
+    4. Tickets       MEASURE    TICKET_NO, aggregate Distinct Count -> {tickets}
+    5. Total fine    MEASURE    TOTAL_FINE, aggregate SUM  -> {fine}  (auto-scaled)
+    6. Offence       CATEGORY   OFFENCE_DESCRIPTION_A      -> {offence}
+                                (the MOST FREQUENT value is shown)
+    7. Last date     CATEGORY   TICKET_DATE                -> {lastDate}
+                                (the LATEST date is shown)
+
+  Measures are per-driver but the data is per-ticket. Set score to AVERAGE,
+  tickets to DISTINCT COUNT, and total fine to SUM. If detail rows arrive the
+  DDC reconstructs each: average, distinct count, and sum-over-distinct.
+
+  The default sentence:
+     صفحة بطاقة التعريف تبين معلومات حول السائق {name}، تصنيف السائق {danger}
+     بدرجة {score}. حصل السائق على {tickets} مخالفة بقيمة {fine} إجمالاً.
+     أكثر المخالفات تكراراً لدى السائق هي {offence}، وسُجّلت آخر مخالفة في
+     تاريخ {lastDate}.
+
+  Any {token} with no data drops its whole clause, so the sentence never
+  leaves dangling punctuation.
+
+  URL PARAMETERS
+  --------------
+    ?t=<template>   override the sentence (URL-encoded, uses the tokens above)
+    ?badge=<text>   badge label (default "AI · Narrative"; empty to hide)
+    ?dp=2           decimals for the score (default 2)
+    ?fineScale=1    auto-scale the fine (19.17 ألف); default shows 19,170
+    ?size=15        base font size in px
+    ?dateFmt=ar|iso month-name arabic | yyyy-mm-dd  (default ar)
+    ?font=0         skip the Google Fonts request
+    ?debug=1        show what VA sent
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&family=Rajdhani:wght@500;600&display=swap">
+<style>
+  :root{
+    --mint:#00C993; --mint-2:#17C7A8;
+    --body:#84A89B; --strong:#EAF7F1;
+    --size:15px;
+    --ar:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+    --lat:"Rajdhani","Segoe UI",Arial,sans-serif;
+    /* danger word colours */
+    --d-lo:#43D6A2; --d-md:#E0B24A; --d-hi:#E39A3A; --d-xh:#E0625C;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;color:var(--body);font-family:var(--ar);
+       overflow:hidden;-webkit-font-smoothing:antialiased}
+  #card{height:100%;width:100%;min-height:0;min-width:0;padding:2px 4px;
+        display:flex;flex-direction:column;justify-content:center;gap:.7em;font-size:var(--size)}
+
+  .hd{display:flex;align-items:center;gap:.7em;flex:none}
+  .hd .bar{width:3px;height:1.25em;border-radius:2px;background:var(--mint);
+           box-shadow:0 0 10px var(--mint);flex:none}
+  .hd h1{font-size:1.13em;font-weight:700;margin:0;color:var(--strong);white-space:nowrap}
+  .badge{display:inline-flex;align-items:center;gap:.5em;flex:none;
+         padding:.25em .9em;border-radius:999px;
+         border:1px solid rgba(23,199,168,.45);color:var(--mint-2);
+         font-family:var(--lat);font-size:.8em;font-weight:600;
+         letter-spacing:.14em;text-transform:uppercase;white-space:nowrap;direction:ltr}
+  .badge svg{width:.9em;height:.9em}
+  .conf{margin-inline-start:auto;font-size:.8em;color:var(--body);white-space:nowrap}
+
+  .narr{font-size:1em;line-height:2;color:var(--body);text-align:right;overflow:hidden}
+  .narr b{color:var(--mint);font-weight:700;font-variant-numeric:tabular-nums}
+  .narr .d-lo{color:var(--d-lo);font-weight:700}
+  .narr .d-md{color:var(--d-md);font-weight:700}
+  .narr .d-hi{color:var(--d-hi);font-weight:700}
+  .narr .d-xh{color:var(--d-xh);font-weight:700}
+
+  #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+       color:var(--body);font-size:13px;text-align:center;padding:20px;pointer-events:none}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;z-index:9;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.97);direction:ltr;text-align:left}
+  #dbg h4{margin:8px 0 4px;font-size:12px;color:var(--mint)}
+  #dbg table{border-collapse:collapse;margin:4px 0;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(0,201,147,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:var(--mint);font-weight:600}
+  #dbg .bad{color:#FF6B6B} #dbg .ok{color:var(--mint)}
+</style>
+</head>
+<body>
+<div id="card" style="display:none">
+  <div class="hd">
+    <span class="bar"></span>
+    <h1 id="title">التحليل الذكي للسائق</h1>
+    <span class="badge" id="badge"></span>
+    <span class="conf" id="conf"></span>
+  </div>
+  <div class="narr" id="narr"></div>
+</div>
+<div id="msg">في انتظار اختيار سائق…</div>
+
+<script>
+(function(){
+  "use strict";
+  var VERSION = "Driver_Insight v1 2026-07-29";
+  console.log("[" + VERSION + "]");
+
+  var Q = {};
+  location.search.replace(/^\?/,"").split("&").forEach(function(kv){
+    if(!kv) return;
+    var i = kv.indexOf("=");
+    Q[decodeURIComponent(i<0?kv:kv.slice(0,i))] = i<0?"":decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));
+  });
+  if (Q.font === "0"){ var g=document.getElementById("gfont"); if(g) g.remove(); }
+  if (Q.size) document.documentElement.style.setProperty("--size", parseInt(Q.size,10)+"px");
+  var DP = Q.dp!==undefined ? parseInt(Q.dp,10) : 2;
+  if (isNaN(DP)) DP = 2;
+  var DEBUG = Q.debug === "1";
+  document.getElementById("title").textContent = Q.title || "التحليل الذكي للسائق";
+
+  var SPARK='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '+
+    'stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.4 13.75 9l5.6 1.75L13.75 12.5'+
+    ' 12 18.1l-1.75-5.6L4.65 10.75 10.25 9 12 3.4Z"/></svg>';
+  document.getElementById("badge").innerHTML =
+    (Q.badge!==undefined?esc(Q.badge):"AI &middot; Narrative") + SPARK;
+  document.getElementById("conf").textContent = Q.conf!==undefined ? Q.conf : "";
+
+  var DEFAULT_T =
+    "صفحة بطاقة التعريف تبين معلومات حول السائق {name}، تصنيف السائق {danger} " +
+    "بدرجة {score}. حصل السائق على {tickets} مخالفة بقيمة {fine} إجمالاً. " +
+    "أكثر المخالفات تكراراً لدى السائق هي {offence}، وسُجّلت آخر مخالفة في تاريخ {lastDate}.";
+  var TEMPLATE = (Q.t!==undefined && Q.t!=="") ? Q.t : DEFAULT_T;
+
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+  function has(v){ return v!==null && v!==undefined && String(v).trim()!=="" &&
+                   String(v).trim().toLowerCase()!=="(missing)"; }
+  function num(n,dp){ return Number(n).toLocaleString("en-US",{
+    minimumFractionDigits: Math.abs(n%1)<1e-9?0:dp, maximumFractionDigits: dp }); }
+
+  /* danger word -> colour class */
+  function dangerClass(v){
+    var s=String(v).trim().toLowerCase();
+    if (/highly dangerous|عالي/.test(s)) return "d-xh";
+    if (/dangerous|خطر/.test(s)) return "d-hi";
+    if (/medium|متوسط/.test(s)) return "d-md";
+    if (/low|منخفض/.test(s)) return "d-lo";
+    return "d-md";
+  }
+  var DANGER_AR = {"low":"منخفضي الخطورة","medium":"متوسطي الخطورة",
+                   "dangerous":"الخطرين","highly dangerous":"عالي الخطورة"};
+  function dangerWord(v){
+    var k=String(v).trim().toLowerCase();
+    return DANGER_AR[k] || String(v);
+  }
+
+  var MONTHS=["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
+  function fmtDate(v){
+    if (!has(v)) return "";
+    var d=new Date(v);
+    if (isNaN(d.getTime())) return String(v);
+    if (Q.dateFmt==="iso") return d.toISOString().slice(0,10);
+    return MONTHS[d.getMonth()] + " " + d.getFullYear();
+  }
+
+  /* split cols into categories (ordered) and measures (ordered) */
+  function classify(columns){
+    var cats=[], meas=[];
+    columns.forEach(function(c,i){
+      var u=String(c.usage||"").toLowerCase(), t=String(c.type||"").toLowerCase();
+      (u==="quantitative"||(!u&&t==="number") ? meas : cats).push(i);
+    });
+    return {cats:cats, meas:meas};
+  }
+
+  function readDriver(columns, rows){
+    var cm = classify(columns);
+    var cats = cm.cats, meas = cm.meas;
+
+    // categories in assignment order: name, danger, offence, lastDate
+    // BUT offence needs MOST FREQUENT and lastDate needs LATEST across rows,
+    // so we compute those from all rows rather than taking row 0.
+    var nameIdx   = cats[0], dangerIdx = cats[1], offIdx = cats[2], dateIdx = cats[3];
+
+    var name   = nameIdx!==undefined ? rows[0][nameIdx] : "";
+    var danger = dangerIdx!==undefined ? rows[0][dangerIdx] : "";
+
+    // most frequent offence across the rows
+    var offence = "";
+    if (offIdx!==undefined){
+      var freq={}, best=null, bestN=0;
+      rows.forEach(function(r){
+        var v=r[offIdx]; if(!has(v)) return; var k=String(v);
+        freq[k]=(freq[k]||0)+1; if(freq[k]>bestN){bestN=freq[k]; best=k;}
+      });
+      offence = best || "";
+    }
+
+    // latest ticket date across the rows
+    var lastDate = "";
+    if (dateIdx!==undefined){
+      var mx=null;
+      rows.forEach(function(r){
+        var v=r[dateIdx]; if(!has(v)) return; var d=new Date(v);
+        if(!isNaN(d.getTime()) && (mx===null||d>mx)) mx=d;
+      });
+      lastDate = mx;
+    }
+
+    // measures: score (avg), tickets (distinct count), fine (sum). VA already
+    // aggregated them, but if detail rows arrive, reconstruct here.
+    var n = rows.length;
+    function measVal(mi, how){
+      if (mi===undefined) return null;
+      if (n===1) return Number(rows[0][mi]);
+      if (how==="avg"){ var s=0,c=0; rows.forEach(function(r){var x=Number(r[mi]);if(!isNaN(x)){s+=x;c++;}}); return c?s/c:null; }
+      if (how==="sum"){
+        // per-ticket rows repeat the driver's total, so a raw sum over-counts.
+        // The true total is the value carried on any single ticket row when
+        // fine is a per-driver total; if it is a per-ticket fine, sum the rows.
+        // We detect: if all rows share one value it is a per-driver total.
+        var vals={}, sum=0, k=0;
+        rows.forEach(function(r){ var x=Number(r[mi]); if(!isNaN(x)){ sum+=x; vals[x]=1; k++; } });
+        var distinct = Object.keys(vals).length;
+        return distinct===1 ? Number(rows[0][mi]) : sum;  // repeated total vs real per-ticket
+      }
+      return n; // distinct-count proxy = row count when detail rows arrive
+    }
+    var score   = measVal(meas[0], "avg");
+    var tickets = measVal(meas[1], "cnt");
+    var fine    = measVal(meas[2], "sum");
+
+    return { name:name, danger:danger, score:score, tickets:tickets, fine:fine,
+             offence:offence, lastDate:lastDate };
+  }
+
+  var TIERS=[[1e12,"تريليون"],[1e9,"مليار"],[1e6,"مليون"],[1e3,"ألف"]];
+  function compact(v){
+    if (v==null||isNaN(v)) return "";
+    var n=Number(v), a=Math.abs(n);
+    for (var i=0;i<TIERS.length;i++){
+      if (a>=TIERS[i][0]){ var x=n/TIERS[i][0]; return num(x, Math.abs(x)>=100?1:2)+" "+TIERS[i][1]; }
+    }
+    return num(n,0);
+  }
+
+  function narrative(D){
+    var tok = {
+      name:    has(D.name)   ? "<b>"+esc(String(D.name))+"</b>" : GAP,
+      danger:  has(D.danger) ? '<span class="'+dangerClass(D.danger)+'">'+esc(dangerWord(D.danger))+"</span>" : GAP,
+      score:   (D.score==null||isNaN(D.score)) ? GAP : "<b>"+esc(num(D.score,DP))+"</b>",
+      tickets: (D.tickets==null||isNaN(D.tickets)) ? GAP : "<b>"+esc(num(D.tickets,0))+"</b>",
+      fine:    (D.fine==null||isNaN(D.fine)) ? GAP :
+               "<b>"+esc(Q.fineScale==="1" ? compact(D.fine) : num(D.fine,0))+" درهم</b>",
+      offence: has(D.offence) ? "<b>"+esc(String(D.offence))+"</b>" : GAP,
+      lastDate: D.lastDate ? "<b>"+esc(fmtDate(D.lastDate))+"</b>" : GAP
+    };
+    var filled = esc(TEMPLATE).replace(/\{(\w+)\}/g, function(_,k){
+      return tok[k]!==undefined ? tok[k] : GAP;
+    });
+    // drop any clause still holding an unfilled token (split on ، and .)
+    var parts = filled.split(/([،.])/), out=[];
+    for (var i=0;i<parts.length;i+=2){
+      var body=parts[i], delim=parts[i+1]||"";
+      if (body.indexOf(GAP)!==-1) continue;
+      if (!body.replace(/\s|<[^>]*>/g,"")) continue;
+      out.push(body+delim);
+    }
+    var txt = out.join("").replace(/\s{2,}/g," ").trim();
+    txt = txt.replace(/،\s*$/,".").replace(/\.\s*\.$/,".");
+    if (txt && !/[.؟!]\s*$/.test(txt)) txt += ".";
+    return txt;
+  }
+  var GAP="\u0000";
+
+  function render(rows, columns){
+    var msg=document.getElementById("msg"), card=document.getElementById("card");
+    if (!rows.length){ card.style.display="none"; msg.style.display="flex"; msg.textContent="لا يوجد سائق مطابق"; return; }
+    msg.style.display="none"; card.style.display="flex";
+    var D = readDriver(columns, rows);
+    document.getElementById("narr").innerHTML = narrative(D);
+  }
+
+  function dump(m){
+    var d=document.getElementById("dbg");
+    if(!d){ d=document.createElement("div"); d.id="dbg"; document.body.appendChild(d); }
+    var cols=m.columns||[], rows=m.data||[];
+    var h="<h4>Driver_Insight debug</h4>version: <b class='ok'>"+VERSION+"</b><br>";
+    h+="rows: <b>"+rows.length+"</b>";
+    if (m.availableRowCount!==undefined && m.availableRowCount>m.rowCount)
+      h+=" <span class='bad'>of "+m.availableRowCount+" - TRUNCATED</span>";
+    h+="<br><br><table><tr><th>#</th><th>column</th><th>usage</th><th>row1</th></tr>";
+    cols.forEach(function(c,i){
+      h+="<tr><td>"+(i+1)+"</td><td>"+esc(c.label||c.name)+"</td><td>"+esc(c.usage||"")+
+         "</td><td>"+esc(String(rows.length?rows[0][i]:""))+"</td></tr>";
+    });
+    h+="</table>";
+    if (rows.length){
+      var D=readDriver(cols,rows);
+      h+="<h4>resolved</h4><table><tr><th>field</th><th>value</th></tr>";
+      [["name",D.name],["danger",D.danger],["score",D.score],["tickets",D.tickets],
+       ["fine(total)",D.fine],["offence(most freq)",D.offence],["lastDate(latest)",D.lastDate]].forEach(function(r){
+        h+="<tr><td>"+r[0]+"</td><td>"+esc(String(r[1]))+"</td></tr>";
+      });
+      h+="</table>";
+    }
+    d.innerHTML=h;
+  }
+
+  function onMessage(ev){
+    var m=ev.data;
+    if(!m||typeof m!=="object"||!m.columns||!m.data) return;
+    if (DEBUG){ dump(m); return; }
+    render(m.data, m.columns);
+  }
+  window.addEventListener("message", onMessage, false);
+
+  var pend=false;
+  window.addEventListener("resize", function(){ if(pend)return; pend=true;
+    requestAnimationFrame(function(){ pend=false; }); }, false);
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window){
+    var rows=[];
+    var off=["تجاوز السرعة المحددة","تجاوز السرعة المحددة","تجاوز السرعة المحددة",
+             "عدم الالتزام بخط السير","القيادة المتهورة"];
+    for (var i=0;i<13;i++){
+      rows.push(["محمد أحمد الكتبي","highly dangerous",0.74,i+1,19170,off[i%off.length],
+                 "2026-0"+((i%6)+1)+"-15 00:00:00"]);
+    }
+    onMessage({ data:{
+      resultName:"preview",
+      columns:[
+        {name:"c1",label:"NAME_A",             type:"string",usage:"categorical"},
+        {name:"c2",label:"DANGER_CATEGORY_DESC",type:"string",usage:"categorical"},
+        {name:"m1",label:"OFFENCE_SCORE",      type:"number",usage:"quantitative"},
+        {name:"m2",label:"TICKET_NO",          type:"number",usage:"quantitative"},
+        {name:"m3",label:"TOTAL_FINE",         type:"number",usage:"quantitative"},
+        {name:"c3",label:"OFFENCE_DESCRIPTION_A",type:"string",usage:"categorical"},
+        {name:"c4",label:"TICKET_DATE",        type:"string",usage:"categorical"}
+      ],
+      data:rows
+    }});
+  }
+})();
+</script>
+</body>
+</html>
