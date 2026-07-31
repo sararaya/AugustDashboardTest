@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heat Grid — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content     Heat_Grid  v1 2026-07-29
+  ======================================================================
+  A grid of tiles, one per category value, coloured low -> high by a measure.
+  Generic: pass any category + a frequency/measure. Transparent background,
+  no padding, no title (use the VA object title). The colour legend sits
+  top-left. Everything scales with the container.
+
+  DATA ROLES  ("Variables" role)
+  ------------------------------
+    1. Category   required   e.g. CNT_description_A (nationality)
+    2. Measure    required   e.g. Frequency / count
+
+  Tiles are sorted highest-first and laid out right-to-left (largest at the
+  RTL start), wrapping into as many rows as fit. Colour interpolates between
+  --low (0DA06E) and --high (C45454).
+
+  URL PARAMETERS
+  --------------
+    ?cols=8         fixed columns per row (default: auto from width)
+    ?max=0          cap the number of tiles shown (0 = all)
+    ?sort=desc      desc | asc | none
+    ?fmt=plain      plain | c (compact ألف/مليون)
+    ?low=0DA06E     low colour (hex, no #)
+    ?high=C45454    high colour (hex, no #)
+    ?legend=0       hide the colour legend
+    ?select=0       disable click-to-filter
+    ?font=0         skip the Google Fonts request
+    ?debug=1        show what VA sent
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap">
+<style>
+  :root{
+    --low:#0DA06E; --high:#C45454;
+    --label:#DCEFE8; --muted:#8FB3A6; --value:#FFFFFF;
+    --size:15px;
+    --ar:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;color:var(--label);font-family:var(--ar);
+       overflow:hidden;-webkit-font-smoothing:antialiased}
+  #root{height:100%;width:100%;min-height:0;min-width:0;padding:0;
+        display:flex;flex-direction:column;gap:.6em}
+
+  /* legend, top-left (physical left) */
+  #legend{flex:none;display:flex;align-items:center;gap:.6em;align-self:flex-start;
+          direction:ltr;font-size:calc(var(--size) * .8);color:var(--muted)}
+  #legend .grad{width:9em;height:.5em;border-radius:99px;
+      background:linear-gradient(90deg,var(--low),#8FA84B,var(--high))}
+  #legend.hide{display:none}
+
+  #grid{flex:1 1 auto;min-height:0;display:grid;gap:.5em;
+        grid-auto-rows:1fr}
+  .tile{border-radius:.6em;padding:.5em .6em;min-width:0;overflow:hidden;
+        display:flex;flex-direction:column;align-items:center;justify-content:center;
+        gap:.2em;cursor:pointer;transition:transform .12s,filter .12s,opacity .12s;
+        border:1px solid rgba(255,255,255,.05)}
+  .tile:hover{filter:brightness(1.12)}
+  .tile.noclick{cursor:default}
+  .tile.dim{opacity:.4}
+  .tile.sel{outline:2px solid #fff;outline-offset:-2px}
+  .tile .lbl{font-size:calc(var(--size) * .82);font-weight:700;color:var(--label);
+             max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
+  .tile .val{font-size:calc(var(--size) * 1.25);font-weight:800;color:var(--value);
+             font-variant-numeric:tabular-nums;line-height:1}
+
+  #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+       color:var(--muted);font-size:12.5px;pointer-events:none}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;z-index:9;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.97);direction:ltr;text-align:left}
+  #dbg h4{margin:8px 0 4px;font-size:12px;color:var(--low)}
+  #dbg table{border-collapse:collapse;margin:4px 0;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(13,160,110,.3);padding:2px 6px;text-align:left}
+  #dbg th{color:var(--low);font-weight:600}
+  #dbg .bad{color:#FF6B6B}
+</style>
+</head>
+<body>
+<div id="root">
+  <div id="legend"><span>أكثر</span><span class="grad"></span><span>أقل</span></div>
+  <div id="grid"></div>
+</div>
+<div id="msg">في انتظار البيانات…</div>
+
+<script>
+(function(){
+  "use strict";
+  var VERSION = "Heat_Grid v1 2026-07-29";
+  console.log("[" + VERSION + "]");
+
+  var Q = {};
+  location.search.replace(/^\?/,"").split("&").forEach(function(kv){
+    if(!kv) return;
+    var i = kv.indexOf("=");
+    Q[decodeURIComponent(i<0?kv:kv.slice(0,i))] = i<0?"":decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));
+  });
+  if (Q.font === "0"){ var g=document.getElementById("gfont"); if(g) g.remove(); }
+  if (Q.low)  document.documentElement.style.setProperty("--low","#"+Q.low.replace("#",""));
+  if (Q.high) document.documentElement.style.setProperty("--high","#"+Q.high.replace("#",""));
+  if (Q.legend === "0") document.getElementById("legend").classList.add("hide");
+
+  var FIXEDCOLS = Q.cols ? parseInt(Q.cols,10) : 0;
+  var MAX     = Q.max ? parseInt(Q.max,10) : 0;
+  var SORT    = Q.sort || "desc";
+  var COMPACT = Q.fmt === "c";
+  var SELECTABLE = Q.select !== "0";
+  var DEBUG   = Q.debug === "1";
+
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+  var TIERS=[[1e9,"مليار"],[1e6,"مليون"],[1e3,"ألف"]];
+  function fmt(v){
+    var n=Number(v); if(isNaN(n)) return String(v);
+    if (COMPACT){ var a=Math.abs(n);
+      for (var i=0;i<TIERS.length;i++) if(a>=TIERS[i][0])
+        return (n/TIERS[i][0]).toLocaleString("en-US",{maximumFractionDigits:1})+" "+TIERS[i][1]; }
+    return n.toLocaleString("en-US",{maximumFractionDigits:0});
+  }
+
+  function hex2rgb(h){ h=h.replace("#",""); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; }
+  function lerp(a,b,t){ return Math.round(a+(b-a)*t); }
+  function rampColor(t){
+    // low -> mid -> high, mixing through a muted olive so mid values read
+    // clearly rather than muddy brown
+    var lo=hex2rgb(getComputedStyle(document.documentElement).getPropertyValue("--low").trim());
+    var hi=hex2rgb(getComputedStyle(document.documentElement).getPropertyValue("--high").trim());
+    var mid=[143,168,75];
+    var c;
+    if (t<0.5){ var u=t/0.5; c=[lerp(lo[0],mid[0],u),lerp(lo[1],mid[1],u),lerp(lo[2],mid[2],u)]; }
+    else { var u2=(t-0.5)/0.5; c=[lerp(mid[0],hi[0],u2),lerp(mid[1],hi[1],u2),lerp(mid[2],hi[2],u2)]; }
+    return "rgb("+c[0]+","+c[1]+","+c[2]+")";
+  }
+
+  var ITEMS=[], RESULT=null, SEL={};
+
+  function build(m){
+    var cols=m.columns||[], rows=m.data||[];
+    var ci=-1, mi=-1;
+    cols.forEach(function(c,i){
+      var u=String(c.usage||"").toLowerCase(), t=String(c.type||"").toLowerCase();
+      var isM=u==="quantitative"||(!u&&t==="number");
+      if (isM){ if(mi===-1) mi=i; } else if (ci===-1) ci=i;
+    });
+    if (ci===-1) ci=0; if (mi===-1) mi=(ci===0?1:0);
+
+    var acc={}, order=[], src={};
+    rows.forEach(function(r,ri){
+      var k=String(r[ci]); if(k===""||k==="null"||k==="undefined") return;
+      var v=Number(r[mi]); if(isNaN(v)) v=0;
+      if(!(k in acc)){ acc[k]=0; order.push(k); src[k]=[]; }
+      acc[k]+=v; src[k].push(ri);
+    });
+    ITEMS=order.map(function(k){ return {k:k,v:acc[k],rows:src[k]}; });
+    if (SORT==="desc") ITEMS.sort(function(a,b){return b.v-a.v;});
+    else if (SORT==="asc") ITEMS.sort(function(a,b){return a.v-b.v;});
+    if (MAX) ITEMS=ITEMS.slice(0,MAX);
+
+    SEL={};
+    if (m.selections) m.selections.forEach(function(s){
+      ITEMS.forEach(function(it){ if(it.rows.indexOf(s.row)!==-1) SEL[it.k]=true; });
+    });
+  }
+
+  function render(){
+    document.getElementById("msg").style.display = ITEMS.length ? "none":"flex";
+    var grid=document.getElementById("grid");
+    if (!ITEMS.length){ grid.innerHTML=""; return; }
+
+    var vals=ITEMS.map(function(i){return i.v;});
+    var mn=Math.min.apply(null,vals), mx=Math.max.apply(null,vals), span=(mx-mn)||1;
+
+    // choose columns: fixed, or from width so tiles stay a pleasant aspect
+    var W=document.documentElement.clientWidth;
+    var cols = FIXEDCOLS || Math.max(1, Math.min(ITEMS.length, Math.round(W/150)));
+    grid.style.gridTemplateColumns = "repeat("+cols+",1fr)";
+
+    var anySel=Object.keys(SEL).length>0;
+    grid.innerHTML = ITEMS.map(function(it){
+      var t=(it.v-mn)/span;
+      var cls="tile"+(SELECTABLE?"":" noclick")+(SEL[it.k]?" sel":"")+(anySel&&!SEL[it.k]?" dim":"");
+      return '<div class="'+cls+'" data-k="'+esc(it.k)+'" style="background:'+rampColor(t)+'">'+
+               '<span class="lbl" title="'+esc(it.k)+'">'+esc(it.k)+"</span>"+
+               '<span class="val">'+esc(fmt(it.v))+"</span>"+
+             "</div>";
+    }).join("");
+  }
+
+  document.addEventListener("click", function(ev){
+    var tile=ev.target.closest(".tile[data-k]");
+    if (!tile || !SELECTABLE) return;
+    var k=tile.getAttribute("data-k");
+    var additive=ev.ctrlKey||ev.metaKey||ev.shiftKey;
+    if (!additive){ var only=SEL[k]&&Object.keys(SEL).length===1; SEL={}; if(!only) SEL[k]=true; }
+    else { if(SEL[k]) delete SEL[k]; else SEL[k]=true; }
+    var sels=[];
+    ITEMS.forEach(function(it){ if(SEL[it.k]) it.rows.forEach(function(ri){ sels.push({row:ri}); }); });
+    try { window.parent.postMessage({resultName:RESULT,selections:sels},"*"); } catch(e){}
+    render();
+  });
+
+  function dump(m){
+    var d=document.getElementById("dbg");
+    if(!d){ d=document.createElement("div"); d.id="dbg"; document.body.appendChild(d); }
+    var h="<h4>Heat_Grid debug</h4>version: "+VERSION+"<br>";
+    h+="rows: <b>"+(m.data||[]).length+"</b>";
+    if (m.availableRowCount!==undefined && m.availableRowCount>m.rowCount)
+      h+=" <span class='bad'>of "+m.availableRowCount+" - TRUNCATED</span>";
+    h+="<br>distinct tiles: <b>"+ITEMS.length+"</b><br><table><tr><th>#</th><th>value</th><th>measure</th></tr>";
+    ITEMS.slice(0,20).forEach(function(it,i){
+      h+="<tr><td>"+(i+1)+"</td><td>"+esc(it.k)+"</td><td>"+fmt(it.v)+"</td></tr>";
+    });
+    h+="</table>";
+    if (ITEMS.length && ITEMS[0].v>1e8)
+      h+="<span class='bad'>values look huge - measure may be summing an ID column, use Count.</span>";
+    d.innerHTML=h;
+  }
+
+  function onMessage(ev){
+    var m=ev.data;
+    if(!m||typeof m!=="object"||!m.columns||!m.data) return;
+    RESULT=m.resultName||RESULT;
+    build(m);
+    if (DEBUG){ dump(m); return; }
+    render();
+  }
+  window.addEventListener("message", onMessage, false);
+
+  var pend=false;
+  function onResize(){ if(pend)return; pend=true;
+    requestAnimationFrame(function(){ pend=false; if(ITEMS.length) render(); }); }
+  if (window.ResizeObserver) new ResizeObserver(onResize).observe(document.documentElement);
+  window.addEventListener("resize", onResize, false);
+
+  /* standalone preview - never runs inside VA */
+  if (window.parent === window){
+    var d=[["الإمارات",181],["الهند",156],["باكستان",89],["بنغلاديش",63],["مصر",57],
+           ["الفلبين",36],["نيبال",28],["الأردن",21],["سوريا",21],["سريلانكا",15],
+           ["لبنان",14],["اليمن",13],["السودان",12],["العراق",11],["فلسطين",10],["عمان",7]];
+    onMessage({ data:{
+      resultName:"preview",
+      columns:[
+        {name:"c1",label:"CNT_description_A",type:"string",usage:"categorical"},
+        {name:"m1",label:"Frequency",type:"number",usage:"quantitative"}
+      ],
+      data:d
+    }});
+  }
+})();
+</script>
+</body>
+</html>
