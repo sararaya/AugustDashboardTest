@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Variable Importance — SAS VA Data-Driven Content</title>
+<!--
+  SAS Visual Analytics — Data-Driven Content   Variable_Importance  v1
+  ==================================================================
+  Runs a standardized linear regression IN THE BROWSER on the columns VA sends
+  and draws a variable-importance bar chart (ascending, like the mock). Use it
+  to see which factors most drive OFFENCE_SCORE (the 0-1 driver risk score).
+
+  DATA ROLES  ("Variables" role)
+  ----------------------------------------
+    1. Target     MEASURE   OFFENCE_SCORE  (the value being explained)
+    2..N Predictors MEASURE  one per candidate factor, e.g.
+         \u0627\u0644\u0633\u0648\u0627\u0628\u0642 \u0627\u0644\u062c\u0646\u0627\u0626\u064a\u0629 (criminal precedents),
+         \u0627\u0644\u0645\u0631\u0643\u0628\u0627\u062a \u0627\u0644\u0645\u0637\u0644\u0648\u0628\u0629 (wanted vehicles),
+         \u0627\u0644\u0645\u0631\u0643\u0628\u0627\u062a \u0627\u0644\u0645\u062d\u062c\u0648\u0632\u0629 (impounded),
+         \u0627\u0644\u0645\u0631\u0643\u0628\u0627\u062a \u0627\u0644\u0645\u0646\u062a\u0647\u064a\u0629 (expired),
+         \u0639\u062f\u062f \u0627\u0644\u0645\u0631\u0643\u0628\u0627\u062a (num vehicles),
+         TOTAL_FINE, TICKET_COUNT ...
+    Optional last CATEGORY: a driver id (Traffic No / TICKET_NO) - if present
+    the DDC de-duplicates to one row per driver first (correct for a driver
+    model when fed the per-ticket join).
+
+  The TARGET is auto-detected as the measure named like score/offence_score/
+  risk; if none matches, the FIRST measure is the target. Everything else is a
+  predictor. Importance = |standardized coefficient|, normalized to 100%.
+
+  URL PARAMETERS
+  --------------
+    ?target=OFFENCE_SCORE   force which measure is the target (by label)
+    ?method=std|perm        std = standardized-coef (default), perm = drop-in-R2
+    ?labels=en|ar|auto      variable label language (default auto)
+    ?top=5                  show only the top N predictors (default 5; 0 = all).
+                            Categorical predictors are dummy-encoded and each
+                            variable's dummy importances are summed into one bar.
+    ?decimals=1             % decimals (default 1)
+    ?font=0                 skip Google Fonts
+    ?debug=1                show the fitted model + what VA sent
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfont" rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&family=Rajdhani:wght@600&display=swap">
+<style>
+  :root{
+    --bar-top:#8CF6E0; --bar-bot:#2BB39A; --bar-edge:#39D6BC;
+    --track:rgba(90,180,165,.10); --track-line:rgba(120,200,185,.14);
+    --pct:#5FE6CE; --label:#Bfe9df; --muted:#7Fb3a6;
+    --ar:"Tajawal","Segoe UI",Tahoma,"Noto Sans Arabic",Arial,sans-serif;
+    --lat:"Rajdhani","Segoe UI",Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:transparent;color:var(--label);font-family:var(--ar);
+       overflow:hidden;-webkit-font-smoothing:antialiased}
+  #wrap{height:100%;width:100%;padding:6px 8px;display:flex;flex-direction:column}
+  #chart{flex:1 1 auto;min-height:0;display:flex;align-items:flex-end;gap:3%;
+         padding-top:26px}
+  .col{flex:1 1 0;min-width:0;height:100%;display:flex;flex-direction:column;
+       align-items:center;justify-content:flex-end;position:relative}
+  .track{position:absolute;left:50%;transform:translateX(-50%);bottom:0;
+         width:78%;height:100%;border-radius:14px;background:var(--track);
+         border:1px solid var(--track-line)}
+  .bar{position:relative;width:78%;border-radius:12px;
+       background:linear-gradient(180deg,var(--bar-top),var(--bar-bot));
+       box-shadow:0 0 18px rgba(57,214,188,.28),inset 0 1px 0 rgba(255,255,255,.35);
+       transition:height .6s cubic-bezier(.22,1,.36,1);min-height:10px}
+  .pct{position:absolute;top:-24px;left:0;right:0;text-align:center;
+       font-family:var(--lat);font-weight:600;font-size:15px;color:var(--pct);
+       white-space:nowrap}
+  .lbl{margin-top:7px;font-size:11px;line-height:1.25;color:var(--label);
+       text-align:center;max-width:100%;overflow:hidden;display:-webkit-box;
+       -webkit-line-clamp:2;-webkit-box-orient:vertical}
+  #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+       color:var(--muted);font-size:12.5px;text-align:center;padding:20px;pointer-events:none}
+  #dbg{position:absolute;inset:0;overflow:auto;padding:10px 12px;z-index:9;
+       font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#CFEEE2;
+       background:rgba(4,18,13,.97);direction:ltr;text-align:left}
+  #dbg h4{margin:8px 0 4px;color:var(--bar-edge)} #dbg table{border-collapse:collapse;width:100%}
+  #dbg td,#dbg th{border:1px solid rgba(57,214,188,.25);padding:2px 6px;text-align:left}
+  #dbg th{color:var(--bar-edge)} #dbg .bad{color:#FF6B6B}
+</style>
+</head>
+<body>
+<div id="wrap"><div id="chart"></div></div>
+<div id="msg">في انتظار البيانات من SAS Visual Analytics…</div>
+
+<script>
+(function(){
+  "use strict";
+  var VERSION="Variable_Importance v1 2026-08-04";
+  console.log("["+VERSION+"]");
+  var Q={};
+  location.search.replace(/^\?/,"").split("&").forEach(function(kv){
+    if(!kv)return;var i=kv.indexOf("=");
+    Q[decodeURIComponent(i<0?kv:kv.slice(0,i))]=i<0?"":decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));});
+  if(Q.font==="0"){var g=document.getElementById("gfont");if(g)g.remove();}
+  var METHOD=Q.method||"std", LANG=Q.labels||"auto",
+      TOPN=Q.top!==undefined?parseInt(Q.top,10):5, DP=Q.decimals!==undefined?parseInt(Q.decimals,10):1,
+      DEBUG=Q.debug==="1";
+
+  function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
+
+  // pretty labels for known columns (en/ar)
+  var LABELS={
+    "السوابق الجنائية":{ar:"السوابق الجنائية",en:"Criminal precedents"},
+    "المركبات المطلوبة":{ar:"المركبات المطلوبة",en:"Wanted vehicles"},
+    "المركبات المحجوزة":{ar:"المركبات المحجوزة",en:"Impounded vehicles"},
+    "المركبات المنتهية":{ar:"المركبات المنتهية",en:"Expired vehicles"},
+    "عدد المركبات":{ar:"عدد المركبات",en:"Number of vehicles"},
+    "TOTAL_FINE":{ar:"إجمالي الغرامات",en:"Total fine"},
+    "TICKET_COUNT":{ar:"عدد المخالفات",en:"Ticket count"},
+    "OFFENCE_SCORE":{ar:"درجة الخطورة",en:"Risk score"}
+  };
+  function labelFor(name){
+    var L=LABELS[name]; if(!L) return name;
+    if(LANG==="en")return L.en; if(LANG==="ar")return L.ar;
+    // auto: arabic if the name has arabic chars else english
+    return /[\u0600-\u06FF]/.test(name)?L.ar:(L.en||L.ar);
+  }
+
+  function classify(cols){
+    var meas=[],cat=[];
+    cols.forEach(function(c,i){var u=String(c.usage||"").toLowerCase(),t=String(c.type||"").toLowerCase();
+      if(u==="quantitative"||(!u&&t==="number"))meas.push(i);else cat.push(i);});
+    return {meas:meas,cat:cat};
+  }
+
+  // --- regression helpers ---
+  function standardize(col){
+    var n=col.length,m=0;for(var i=0;i<n;i++)m+=col[i];m/=n;
+    var v=0;for(i=0;i<n;i++)v+=(col[i]-m)*(col[i]-m);v=Math.sqrt(v/n)||1;
+    return col.map(function(x){return (x-m)/v;});
+  }
+  // OLS via normal equations (X'X)b = X'y, X already standardized + intercept
+  function ols(X,y){
+    var n=X.length,p=X[0].length;
+    var XtX=[],Xty=[];
+    for(var a=0;a<p;a++){XtX.push(new Array(p).fill(0));Xty.push(0);}
+    for(var i=0;i<n;i++){for(a=0;a<p;a++){Xty[a]+=X[i][a]*y[i];
+      for(var b=0;b<p;b++)XtX[a][b]+=X[i][a]*X[i][b];}}
+    return solve(XtX,Xty);
+  }
+  function solve(A,b){ // Gaussian elimination with partial pivot
+    var n=b.length,M=A.map(function(r,i){return r.concat(b[i]);});
+    for(var c=0;c<n;c++){
+      var piv=c;for(var r=c+1;r<n;r++)if(Math.abs(M[r][c])>Math.abs(M[piv][c]))piv=r;
+      var tmp=M[c];M[c]=M[piv];M[piv]=tmp;
+      if(Math.abs(M[c][c])<1e-12)M[c][c]=1e-12;
+      for(r=0;r<n;r++){if(r===c)continue;var f=M[r][c]/M[c][c];
+        for(var k=c;k<=n;k++)M[r][k]-=f*M[c][k];}
+    }
+    var x=[];for(var i=0;i<n;i++)x.push(M[i][n]/M[i][i]);return x;
+  }
+
+  // fit takes a pre-built numeric predictor matrix (columns already encoded).
+  function fit(rows, mat, y){
+    var p=mat[0].length;
+    var cols=[];
+    for(var j=0;j<p;j++){ cols.push(standardize(mat.map(function(r){return r[j];}))); }
+    var ys=standardize(y);
+    var X=rows.map(function(_,i){var row=cols.map(function(c){return c[i];});row.push(1);return row;});
+    var beta=ols(X,ys);
+    var coef=beta.slice(0,p);
+    var yhat=X.map(function(xr){var s=0;for(var k=0;k<beta.length;k++)s+=xr[k]*beta[k];return s;});
+    var ybar=0;ys.forEach(function(v){ybar+=v;});ybar/=ys.length;
+    var ssr=0,sst=0;ys.forEach(function(v,i){ssr+=(v-yhat[i])*(v-yhat[i]);sst+=(v-ybar)*(v-ybar);});
+    return {coef:coef,r2:sst?1-ssr/sst:0};
+  }
+
+  var STATE={items:[],r2:0};
+
+  function build(m){
+    var cols=m.columns||[], rows=m.data||[];
+    var cm=classify(cols);
+
+    // target: ?target=, else a measure named like score/risk, else first measure
+    var targIdx=-1;
+    if(Q.target){cols.forEach(function(c,i){if((c.label||c.name||"").toLowerCase()===Q.target.toLowerCase())targIdx=i;});}
+    if(targIdx<0)cm.meas.forEach(function(i){if(targIdx<0&&/score|risk|offence_score|خطورة/i.test(cols[i].label||cols[i].name||""))targIdx=i;});
+    if(targIdx<0&&cm.meas.length)targIdx=cm.meas[0];
+    if(targIdx<0){STATE.items=[];STATE.n=0;return;}
+
+    // classify each CATEGORY column: a near-unique one (>=90% distinct) is a row/
+    // driver ID used only for de-duplication; the rest are PREDICTORS (encoded).
+    var idIdx=-1, catPreds=[];
+    cm.cat.forEach(function(ci){
+      var vals={},n=0;
+      for(var r=0;r<rows.length;r++){var v=rows[r][ci];if(v!=null&&v!==""){vals[v]=1;n++;}}
+      var distinct=Object.keys(vals).length;
+      if(n && distinct/n>=0.9 && distinct>Math.min(50,rows.length*0.5)) { if(idIdx<0) idIdx=ci; }
+      else catPreds.push(ci);
+    });
+
+    // de-duplicate to one row per id (correct when fed the per-ticket join)
+    var use=rows;
+    if(idIdx>=0){var seen={},dd=[];rows.forEach(function(r){var k=String(r[idIdx]);
+      if(!(k in seen)){seen[k]=1;dd.push(r);}});use=dd;}
+
+    var measPreds=cm.meas.filter(function(i){return i!==targIdx;});
+
+    // keep rows with finite target + finite numeric predictors (categoricals may
+    // be any value; missing category becomes its own "(missing)" level)
+    use=use.filter(function(r){
+      if(!isFinite(+r[targIdx]))return false;
+      for(var k=0;k<measPreds.length;k++)if(!isFinite(+r[measPreds[k]]))return false;
+      return true;
+    });
+    if(use.length<5 || (measPreds.length+catPreds.length)<1){STATE.items=[];STATE.n=use.length;return;}
+
+    // ---- build design matrix + a group map (design col -> display variable) ----
+    var mat=[], varNames=[];
+    // numeric predictors: one column each
+    measPreds.forEach(function(pi){ varNames.push({idx:varNames.length,name:cols[pi].label||cols[pi].name}); });
+    // categorical predictors: dummy-encode (drop first level as reference)
+    var catInfo=catPreds.map(function(ci){
+      var levels=[]; var seen={};
+      use.forEach(function(r){var v=(r[ci]==null||r[ci]==="")?"(missing)":String(r[ci]);
+        if(!(v in seen)){seen[v]=1;levels.push(v);}});
+      levels.sort();
+      var vg=varNames.length; varNames.push({idx:vg,name:cols[ci].label||cols[ci].name});
+      return {ci:ci,levels:levels.slice(1),ref:levels[0],vg:vg}; // drop first as reference
+    });
+
+    use.forEach(function(r){
+      var row=[];
+      measPreds.forEach(function(pi){ row.push(+r[pi]); });
+      catInfo.forEach(function(info){
+        var v=(r[info.ci]==null||r[info.ci]==="")?"(missing)":String(r[info.ci]);
+        info.levels.forEach(function(lv){ row.push(v===lv?1:0); });
+      });
+      mat.push(row);
+    });
+    // map each design column -> varName index
+    var colGroup=[];
+    measPreds.forEach(function(_,k){ colGroup.push(k); });
+    catInfo.forEach(function(info){ info.levels.forEach(function(){ colGroup.push(info.vg); }); });
+
+    var y=use.map(function(r){return +r[targIdx];});
+    var res=fit(use,mat,y);
+
+    // aggregate |coef| per display variable (sum dummy contributions)
+    var agg={};
+    res.coef.forEach(function(c,j){ var g=colGroup[j]; agg[g]=(agg[g]||0)+Math.abs(c); });
+    var tot=Object.keys(agg).reduce(function(a,k){return a+agg[k];},0)||1;
+    var items=varNames.map(function(v){ return {name:v.name, pct:(agg[v.idx]||0)/tot*100}; });
+
+    items.sort(function(a,b){return a.pct-b.pct;});           // ascending
+    if(TOPN>0 && items.length>TOPN) items=items.slice(items.length-TOPN);
+    // renormalize shown bars to 100%
+    var shown=items.reduce(function(a,d){return a+d.pct;},0)||1;
+    items.forEach(function(d){d.pct=d.pct/shown*100;});
+
+    STATE.items=items; STATE.r2=res.r2; STATE.n=use.length;
+    STATE.target=cols[targIdx].label||cols[targIdx].name;
+    STATE.nCat=catPreds.length; STATE.nMeas=measPreds.length; STATE.idUsed=idIdx>=0?(cols[idIdx].label||cols[idIdx].name):null;
+  }
+
+
+  function render(){
+    var chart=document.getElementById("chart"), msg=document.getElementById("msg");
+    if(!STATE.items.length){chart.innerHTML="";msg.style.display="flex";
+      msg.textContent="مطلوب: درجة الخطورة + متغيّرات (رقمية أو فئوية)";return;}
+    msg.style.display="none";
+    var mx=Math.max.apply(null,STATE.items.map(function(d){return d.pct;}))||1;
+    chart.innerHTML=STATE.items.map(function(d){
+      var h=8+(d.pct/mx)*92;   // 8%..100% of the column height
+      return '<div class="col"><div class="track"></div>'+
+             '<div class="bar" style="height:'+h.toFixed(1)+'%">'+
+               '<span class="pct">'+d.pct.toFixed(DP)+'%</span></div>'+
+             '<div class="lbl">'+esc(labelFor(d.name))+"</div></div>";
+    }).join("");
+  }
+
+  function dbg(m){
+    var d=document.getElementById("dbg");if(!d){d=document.createElement("div");d.id="dbg";document.body.appendChild(d);}
+    var cols=m.columns||[],rows=m.data||[];
+    var h="<h4>"+VERSION+"</h4>rows sent: "+rows.length+" &nbsp; used (deduped/clean): "+(STATE.n||0)+
+      "<br>target: <b>"+esc(STATE.target||"?")+"</b> &nbsp; R\u00b2: <b>"+(STATE.r2||0).toFixed(3)+"</b>"+
+      "<br>numeric predictors: "+(STATE.nMeas||0)+" &nbsp; categorical predictors: "+(STATE.nCat||0)+
+      (STATE.idUsed?(" &nbsp; id (deduped on): "+esc(STATE.idUsed)):"")+"<br><br>";
+    h+="<table><tr><th>#</th><th>column</th><th>usage</th><th>eg</th></tr>";
+    cols.forEach(function(c,i){h+="<tr><td>"+(i+1)+"</td><td>"+esc(c.label||c.name)+"</td><td>"+esc(c.usage||"")+
+      "</td><td>"+esc(String(rows[0]?rows[0][i]:""))+"</td></tr>";});
+    h+="</table><h4>importance</h4><table><tr><th>variable</th><th>%</th><th>std coef</th></tr>";
+    STATE.items.slice().reverse().forEach(function(it){h+="<tr><td>"+esc(it.name)+"</td><td>"+it.pct.toFixed(2)+
+      "</td><td>"+it.coef.toFixed(3)+"</td></tr>";});
+    h+="</table>";
+    if(rows.length<20)h+="<br><span class='bad'>Few rows \u2014 raise this object's Data \u2192 max rows so the model sees all drivers.</span>";
+    d.innerHTML=h;
+  }
+
+  function onMessage(ev){var m=ev.data;
+    if(!m||typeof m!=="object"||!m.columns||!m.data)return;
+    build(m); if(DEBUG){dbg(m);return;} render();}
+  window.addEventListener("message",onMessage,false);
+
+  var pend=false;
+  function rz(){if(pend)return;pend=true;requestAnimationFrame(function(){pend=false;render();});}
+  if(window.ResizeObserver)new ResizeObserver(rz).observe(document.documentElement);
+  window.addEventListener("resize",rz,false);
+
+  /* standalone preview */
+  if(window.parent===window){
+    var cols=[{label:"OFFENCE_SCORE",usage:"quantitative"},
+      {label:"السوابق الجنائية",usage:"quantitative"},{label:"المركبات المطلوبة",usage:"quantitative"},
+      {label:"المركبات المحجوزة",usage:"quantitative"},{label:"المركبات المنتهية",usage:"quantitative"},
+      {label:"عدد المركبات",usage:"quantitative"},{label:"TOTAL_FINE",usage:"quantitative"},
+      {label:"Traffic No",usage:"categorical"}];
+    var data=[];
+    for(var i=0;i<300;i++){
+      var crim=Math.floor(Math.random()*7),want=Math.floor(Math.random()*9),imp=Math.floor(Math.random()*5),
+          exp=Math.floor(Math.random()*38),nv=1+Math.floor(Math.random()*90),fine=200+Math.random()*100000;
+      var score=Math.min(.99,Math.max(.02, .05+.30*(crim/6)+.22*(want/8)+.15*(imp/4)+.10*(fine/100000)+.06*(exp/38)+ (Math.random()-.5)*.08));
+      data.push([+score.toFixed(4),crim,want,imp,exp,nv,+fine.toFixed(0),1000+i]);
+    }
+    onMessage({data:{resultName:"preview",columns:cols,data:data}});
+  }
+})();
+</script>
+</body>
+</html>
